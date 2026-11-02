@@ -227,10 +227,16 @@ fun App(prefs: SharedPreferences, version: String) {
 
     fun resetWw(i: Int) = setAdj(adj.copy(wwOffsets = adj.wwOffsets.toMutableList().also { it[i] = 0 }))
 
-    fun newDay() {
+    fun resetPlan() {
         val prev = adj
+        val prevEventKey = eventKey
         setAdj(SleepEngine.Adjustments(List(plan.naps) { 0 }, List(plan.naps + 1) { 0 }))
-        showUndo("Новый день: правки снов и окон сброшены") { setAdj(prev) }
+        eventKey = null
+        settingsOpen = false
+        showUndo("Базовый план восстановлен") {
+            setAdj(prev)
+            eventKey = prevEventKey
+        }
     }
 
     fun selectAge(option: SleepEngine.Age) {
@@ -334,7 +340,7 @@ fun App(prefs: SharedPreferences, version: String) {
                     onToggleRegress = ::toggleRegress,
                     onChangeFeed = ::changeFeed,
                     onResetFeeds = ::resetFeeds,
-                    onNewDay = ::newDay,
+                    onResetPlan = ::resetPlan,
                     onBack = { settingsOpen = false },
                 )
                 else -> MainScreen(
@@ -364,6 +370,7 @@ fun App(prefs: SharedPreferences, version: String) {
                     onOpenSettings = { settingsOpen = true },
                     onNightMode = { nightMode = true },
                     onShare = ::shareDay,
+                    onResetPlan = ::resetPlan,
                 )
             }
         }
@@ -411,6 +418,7 @@ private fun MainScreen(
     onOpenSettings: () -> Unit,
     onNightMode: () -> Unit,
     onShare: () -> Unit,
+    onResetPlan: () -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -490,6 +498,27 @@ private fun MainScreen(
                 onEditLastWindow = { onEventKey("ww${schedule.windows.lastIndex}") },
                 onEditWake = onWakeOpen,
             )
+
+            if (schedule.hasFacts || schedule.regress) {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    if (schedule.hasFacts) {
+                        FactPill(
+                            "Вернуть базовый план",
+                            onResetPlan,
+                            modifier = Modifier.fillMaxWidth(),
+                            a11y = "Сбросить ручные правки снов и бодрствований, сохранив подъём, кормления и схему",
+                        )
+                        Text(
+                            "Сбросит правки снов и бодрствований. Подъём и кормления сохранятся.",
+                            fontSize = 12.sp, color = Subtitle,
+                        )
+                    }
+                    if (schedule.regress) {
+                        Text("Сокращение окон включено: −10 мин. При сбросе останется включённым.",
+                            fontSize = 12.sp, color = Amber)
+                    }
+                }
+            }
 
             Timeline(
                 schedule = schedule,
@@ -986,7 +1015,7 @@ private fun SettingsScreen(
     onToggleRegress: () -> Unit,
     onChangeFeed: (Int, Int) -> Unit,
     onResetFeeds: () -> Unit,
-    onNewDay: () -> Unit,
+    onResetPlan: () -> Unit,
     onBack: () -> Unit,
 ) {
     Column(
@@ -1083,11 +1112,11 @@ private fun SettingsScreen(
 
         SettingsSection("День") {
             Text(
-                "Сохранённые правки снов и окон действуют, пока их не сбросишь. «Начать новый день» сбрасывает правки, но сохраняет схему, подъём, кормления и режим.",
+                "Сохранённые правки снов и окон действуют, пока их не сбросишь. «Вернуть базовый план» сбрасывает правки, но сохраняет схему, подъём, кормления и режим.",
                 fontSize = 12.sp,
                 color = DarkScheme.onSurfaceVariant,
             )
-            FactPill("Начать новый день", onNewDay, modifier = Modifier.padding(top = 6.dp), a11y = "Сбросить правки снов и окон")
+            FactPill("Вернуть базовый план", onResetPlan, modifier = Modifier.padding(top = 6.dp), a11y = "Сбросить правки снов и окон")
         }
 
         SettingsSection("О приложении") {
