@@ -70,6 +70,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -427,7 +428,7 @@ private fun MainScreen(
 
             // Шапка: Сегодня + схема, справа вход в настройки
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Column {
+                Column(Modifier.weight(1f)) {
                     Text("Сегодня", fontSize = 24.sp, fontWeight = FontWeight.Bold)
                     Text(
                         "${age.label} · ${plan.name}",
@@ -435,7 +436,8 @@ private fun MainScreen(
                         color = Subtitle,
                     )
                 }
-                Spacer(Modifier.weight(1f))
+                IconPressable(R.drawable.ic_share, "Поделиться", "Поделиться расписанием", onShare)
+                Spacer(Modifier.width(8.dp))
                 IconPressable(
                     icon = R.drawable.ic_sliders,
                     label = "Настройки",
@@ -465,8 +467,8 @@ private fun MainScreen(
                     "Подъём ${SleepEngine.fmtClock(schedule.wake)}",
                     fontSize = 16.sp,
                     fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f),
                 )
-                Spacer(Modifier.weight(1f))
                 Text(
                     if (wakeOpen) "Свернуть" else "Изменить",
                     fontSize = 13.sp,
@@ -514,26 +516,16 @@ private fun MainScreen(
             Spacer(Modifier.height(8.dp))
         }
 
-        // Закреплённая нижняя панель
         Surface(color = DarkScheme.surface, tonalElevation = 0.dp) {
             Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                    .clickable(onClick = onNightMode).padding(horizontal = 18.dp, vertical = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                BarButton(
-                    icon = R.drawable.ic_night,
-                    text = "Ночной экран",
-                    modifier = Modifier.weight(1f),
-                    onClick = onNightMode,
-                )
-                BarButton(
-                    icon = R.drawable.ic_share,
-                    text = "Поделиться",
-                    modifier = Modifier.weight(1f),
-                    onClick = onShare,
-                )
+                Icon(resPainter(R.drawable.ic_night), contentDescription = null,
+                    tint = NightTint, modifier = Modifier.size(18.dp))
+                Text("Ночной экран", fontSize = 14.sp, color = NightTint)
             }
         }
     }
@@ -597,122 +589,46 @@ private fun HeroBlock(
     onEditWake: () -> Unit,
 ) {
     val title: String
-    val icon: Int
-    val bigTime: String
-    val line1: String
-    val line2: String
+    val time: Int
     val onEdit: () -> Unit
-    val editLabel: String
-
     when (now.phase) {
         SleepEngine.Phase.NAP -> {
-            val nap = schedule.naps[now.napIndex - 1]
-            title = "Сон ${nap.index} по плану до"
-            icon = R.drawable.ic_moon
-            bigTime = SleepEngine.fmtClock(nap.end)
-            line1 = "Сон ${SleepEngine.fmtClock(nap.start)}–${SleepEngine.fmtClock(nap.end)}" +
-                " · ${SleepEngine.fmtDurHuman(nap.duration)}"
-            val nextWw = schedule.windows.getOrNull(nap.index)?.effective
-            line2 = if (nextWw != null) {
-                "Затем бодрствование ${SleepEngine.fmtDurHuman(nextWw)}"
-            } else "Затем ночь"
-            onEdit = { onEditNap(nap.index) }
-            editLabel = "Изменить длительность сна"
+            title = "По плану сейчас сон ${now.napIndex}"
+            time = now.nextAbs
+            onEdit = { onEditNap(now.napIndex) }
         }
         SleepEngine.Phase.WINDOW -> {
-            val nextNap = schedule.naps.firstOrNull { it.start == now.nextAbs }
-            if (nextNap != null) {
-                title = "Следующий сон по плану"
-                icon = R.drawable.ic_moon
-                bigTime = SleepEngine.fmtClock(nextNap.start)
-                line1 = "Сейчас бодрствование · ${SleepEngine.fmtClock(now.nextAbs)} — укладывание"
-                line2 = "Сон ${SleepEngine.fmtClock(nextNap.start)}–${SleepEngine.fmtClock(nextNap.end)}" +
-                    " · ${SleepEngine.fmtDurHuman(nextNap.duration)}"
-                onEdit = { onEditNap(nextNap.index) }
-                editLabel = "Изменить длительность сна"
-            } else {
-                title = "Уход в ночь по плану"
-                icon = R.drawable.ic_night
-                bigTime = SleepEngine.fmtClock(schedule.bedtime)
-                line1 = "Сейчас бодрствование"
-                line2 = "Ночь ${SleepEngine.fmtClock(schedule.bedtime)}–${SleepEngine.fmtClock(schedule.wake)}" +
-                    " · ${SleepEngine.fmtDurHuman(schedule.nightSleep)}"
-                onEdit = onEditLastWindow
-                editLabel = "Изменить последнее бодрствование"
-            }
+            val nap = schedule.naps.firstOrNull { it.start == now.nextAbs }
+            title = if (nap != null) "Следующий сон по плану" else "Ночной сон по плану"
+            time = now.nextAbs
+            onEdit = if (nap != null) ({ onEditNap(nap.index) }) else onEditLastWindow
         }
         SleepEngine.Phase.NIGHT -> {
-            title = "Подъём по плану"
-            icon = R.drawable.ic_sun
-            bigTime = SleepEngine.fmtClock(schedule.wake)
-            line1 = "Ночь ${SleepEngine.fmtClock(schedule.bedtime)}–${SleepEngine.fmtClock(schedule.wake)}" +
-                " · ${SleepEngine.fmtDurHuman(schedule.nightSleep)}"
-            line2 = "Ночные кормления — в расписании ниже"
+            title = "По плану сейчас ночь"
+            time = schedule.wake
             onEdit = onEditWake
-            editLabel = "Изменить время подъёма"
         }
     }
-
     Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(18.dp))
-            .background(DarkScheme.surface)
-            .border(1.dp, ActiveBorder, RoundedCornerShape(18.dp))
-            .padding(16.dp),
+        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp))
+            .background(DarkScheme.surface).padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Icon(resPainter(icon), contentDescription = null, tint = ActiveBorder, modifier = Modifier.size(18.dp))
-            Text(title, fontSize = 14.sp, color = Subtitle)
-        }
-        RollingText(
-            text = bigTime,
-            fontSize = 44.sp,
-            fontWeight = FontWeight.Bold,
-            color = DarkScheme.onBackground,
-            modifier = Modifier.padding(vertical = 4.dp),
-        )
+        Text(title, fontSize = 14.sp, color = Subtitle)
         Text(
-            SleepEngine.fmtIn(now.minutesLeft),
-            fontSize = 16.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = ActiveBorder,
+            (if (now.phase == SleepEngine.Phase.WINDOW) "В " else "До ") + SleepEngine.fmtClock(time),
+            fontSize = 28.sp, fontWeight = FontWeight.Bold, color = DarkScheme.onSurface,
         )
-        Text(line1, fontSize = 13.sp, color = DarkScheme.onSurfaceVariant, modifier = Modifier.padding(top = 6.dp))
-        Text(line2, fontSize = 13.sp, color = DarkScheme.onSurfaceVariant)
-        FactPill(
-            "Изменить",
-            onEdit,
-            modifier = Modifier.padding(top = 8.dp),
-            a11y = editLabel,
-        )
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(if (now.phase == SleepEngine.Phase.WINDOW) SleepEngine.fmtIn(now.minutesLeft)
+                else "Осталось ${SleepEngine.fmtDurHuman(now.minutesLeft)}", fontSize = 14.sp,
+                color = ActiveBorder, modifier = Modifier.weight(1f))
+            FactPill("Изменить", onEdit, a11y = "Изменить текущее событие расписания")
+        }
     }
 }
 
-// ══════════════════════════ ЛЕНТА ═════════════════════════════════════════
-
-private sealed interface TItem {
-    val key: String
-    val past: Boolean
-}
-
-private data class TNap(val nap: SleepEngine.ScheduledNap, override val past: Boolean) : TItem {
-    override val key get() = "nap${nap.index}"
-}
-
-private data class TWindow(
-    val window: SleepEngine.Window,
-    val endClock: String,
-    val isLast: Boolean,
-    override val past: Boolean,
-) : TItem {
-    override val key get() = "ww${window.index}"
-}
-
-private data class TFeed(val placement: SleepEngine.FeedPlacement, override val past: Boolean) : TItem {
-    override val key get() = "feed${placement.feed}"
-}
-
+// Лента строится из единого списка событий, а не из блоков сна с кормлениями в конце.
 @Composable
 private fun Timeline(
     schedule: SleepEngine.Schedule,
@@ -728,299 +644,104 @@ private fun Timeline(
     onChangeWw: (Int, Int) -> Unit,
     onResetWw: (Int) -> Unit,
 ) {
-    val wakeTod = ((schedule.wake % 1440) + 1440) % 1440
-    fun feedAbs(f: Int) = if (f >= wakeTod) f else f + 1440
-
-    val items = buildList {
-        placements.filter { it.kind == SleepEngine.FeedKind.AT_WAKE }.forEach { add(TFeed(it, past = false)) }
-        for (i in schedule.naps.indices) {
-            val w = schedule.windows[i]
-            val nap = schedule.naps[i]
-            add(TWindow(w, SleepEngine.fmtClock(nap.start), isLast = false, past = false))
-            add(TNap(nap, past = false))
-            placements.filter { it.kind == SleepEngine.FeedKind.IN_WINDOW && it.slot == nap.index }.forEach {
-                add(TFeed(it, past = false))
-            }
-            placements.filter { it.kind == SleepEngine.FeedKind.IN_NAP && it.slot == nap.index }.forEach {
-                add(TFeed(it, past = false))
-            }
-        }
-        val lastW = schedule.windows.last()
-        add(TWindow(lastW, SleepEngine.fmtClock(schedule.bedtime), isLast = true, past = false))
-        placements.filter { it.kind == SleepEngine.FeedKind.IN_WINDOW && it.slot == schedule.naps.size + 1 }
-            .forEach { add(TFeed(it, past = false)) }
-    }
-
-    // «Сейчас» в абсолютных минутах и граница «прошло»
+    val events = SleepEngine.timeline(schedule, placements.map { it.feed })
     val nowAbs = now.nextAbs - now.minutesLeft
-
-    fun isPastWindow(w: SleepEngine.Window): Boolean {
-        val boundary = if (w.index < schedule.naps.size) schedule.naps[w.index].start else schedule.bedtime
-        return boundary <= nowAbs
+    fun isPast(event: SleepEngine.DayEvent): Boolean {
+        // Начало текущего сна остаётся рядом с его окончанием и редактором.
+        if (event.kind == SleepEngine.EventKind.NAP_START &&
+            now.phase == SleepEngine.Phase.NAP && event.index == now.napIndex) return false
+        if (event.kind == SleepEngine.EventKind.WAKE && now.phase == SleepEngine.Phase.WINDOW && now.windowIndex == 0) return false
+        if (event.kind == SleepEngine.EventKind.NAP_END && now.phase == SleepEngine.Phase.WINDOW && event.index == now.windowIndex) return false
+        if (event.kind == SleepEngine.EventKind.BEDTIME && now.phase == SleepEngine.Phase.NIGHT) return false
+        return event.time < nowAbs
     }
-
-    val enriched = items.map { item ->
-        when (item) {
-            is TNap -> item.copy(past = item.nap.end <= nowAbs)
-            is TWindow -> item.copy(past = isPastWindow(item.window))
-            is TFeed -> item.copy(past = feedAbs(item.placement.feed) <= nowAbs)
+    val past = events.filter { isPast(it) }
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        if (past.isNotEmpty()) {
+            Text(
+                (if (pastOpen) "▾ " else "▸ ") + "Ранее по плану · ${past.size}",
+                fontSize = 13.sp, color = Subtitle,
+                modifier = Modifier.fillMaxWidth().clickable(onClick = onPastOpen)
+                    .heightIn(min = 48.dp).padding(vertical = 12.dp),
+            )
         }
-    }
-    val pastItems = enriched.filter { it.past }
-    val futureItems = enriched.filter { !it.past }
-
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        if (pastItems.isNotEmpty()) {
+        val visible = if (pastOpen) events else events.filter {
+            !isPast(it) || (it.kind == SleepEngine.EventKind.WAKE && eventKey == "ww0") ||
+                (it.kind == SleepEngine.EventKind.NAP_END && eventKey == "ww${it.index}") ||
+                (it.kind == SleepEngine.EventKind.NAP_START && eventKey == "nap${it.index}")
+        }
+        visible.forEach { event ->
+            val nap = schedule.naps.firstOrNull { it.index == event.index }
+            val windowIndex = when (event.kind) {
+                SleepEngine.EventKind.WAKE -> 0
+                SleepEngine.EventKind.NAP_END -> event.index
+                else -> null
+            }
+            val key = when (event.kind) {
+                SleepEngine.EventKind.NAP_START -> "nap${event.index}"
+                SleepEngine.EventKind.WAKE, SleepEngine.EventKind.NAP_END -> "ww$windowIndex"
+                else -> null
+            }
+            val active = when (event.kind) {
+                SleepEngine.EventKind.NAP_START -> now.phase == SleepEngine.Phase.NAP && now.napIndex == event.index
+                SleepEngine.EventKind.WAKE, SleepEngine.EventKind.NAP_END -> now.phase == SleepEngine.Phase.WINDOW && now.windowIndex == windowIndex
+                SleepEngine.EventKind.BEDTIME -> now.phase == SleepEngine.Phase.NIGHT
+                else -> false
+            }
+            val title = when (event.kind) {
+                SleepEngine.EventKind.WAKE -> "Подъём"
+                SleepEngine.EventKind.NAP_START -> "Сон ${event.index}"
+                SleepEngine.EventKind.NAP_END -> "Пробуждение"
+                SleepEngine.EventKind.FEED -> "Кормление"
+                SleepEngine.EventKind.BEDTIME -> "Ночной сон"
+            }
+            val detail = when (event.kind) {
+                SleepEngine.EventKind.NAP_START -> SleepEngine.fmtDurHuman(nap!!.duration)
+                SleepEngine.EventKind.WAKE, SleepEngine.EventKind.NAP_END -> {
+                    val window = schedule.windows[windowIndex!!]
+                    "Бодрствование " + SleepEngine.fmtDurHuman(window.effective)
+                }
+                SleepEngine.EventKind.BEDTIME -> "До ${SleepEngine.fmtClock(schedule.wake)} · ${SleepEngine.fmtDurHuman(schedule.nightSleep)}"
+                SleepEngine.EventKind.FEED -> {
+                    val overlap = schedule.naps.firstOrNull { feedTimeInNap(event.time, it) }
+                    if (overlap != null) "Во время сна ${overlap.index} · до конца ${SleepEngine.fmtDurHuman(overlap.end - event.time)}" else null
+                }
+            }
+            val tint = when (event.kind) {
+                SleepEngine.EventKind.FEED -> FeedTint
+                SleepEngine.EventKind.NAP_START, SleepEngine.EventKind.BEDTIME -> NightTint
+                else -> Subtitle
+            }
             Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(10.dp))
-                    .clickable(onClick = onPastOpen)
-                    .padding(vertical = 8.dp, horizontal = 4.dp),
+                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
+                    .background(if (active) ActiveBg else Color.Transparent)
+                    .then(if (key != null) Modifier.clickable { onEventKey(key) } else Modifier)
+                    .heightIn(min = 52.dp).padding(horizontal = 8.dp, vertical = 9.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                Text(
-                    (if (pastOpen) "▾ " else "▸ ") + "Прошедшие события · ${pastItems.size}",
-                    fontSize = 13.sp, color = Subtitle,
-                )
+                Text(SleepEngine.fmtClock(event.time), fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold, color = tint,
+                    modifier = Modifier.width((62 * LocalDensity.current.fontScale).dp), softWrap = false)
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                    Text(title, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = tint)
+                    if (detail != null) Text(detail, fontSize = 12.sp, color = Subtitle)
+                }
+                if (key != null) Icon(resPainter(R.drawable.ic_edit), contentDescription = null, tint = Subtitle, modifier = Modifier.size(16.dp))
             }
-            if (pastOpen) {
-                pastItems.forEach { item ->
-                    TimelineItem(item, schedule, age, now, eventKey, onEventKey, onChangeNap, onResetNap, onChangeWw, onResetWw)
+            if (key != null && eventKey == key) {
+                if (event.kind == SleepEngine.EventKind.NAP_START) {
+                    NapEditor(nap!!, { onChangeNap(nap.index - 1, it) }, { onResetNap(nap.index - 1) })
+                } else if (windowIndex != null) {
+                    WindowEditor(age, schedule.windows[windowIndex],
+                        { onChangeWw(windowIndex, it) }, { onResetWw(windowIndex) })
                 }
             }
         }
-        futureItems.forEach { item ->
-            TimelineItem(item, schedule, age, now, eventKey, onEventKey, onChangeNap, onResetNap, onChangeWw, onResetWw)
-        }
-        NightSection(schedule, placements, now)
     }
 }
 
-@Composable
-private fun TimelineItem(
-    item: TItem,
-    schedule: SleepEngine.Schedule,
-    age: SleepEngine.Age,
-    now: SleepEngine.NowInfo,
-    eventKey: String?,
-    onEventKey: (String) -> Unit,
-    onChangeNap: (Int, Int) -> Unit,
-    onResetNap: (Int) -> Unit,
-    onChangeWw: (Int, Int) -> Unit,
-    onResetWw: (Int) -> Unit,
-) {
-    when (item) {
-        is TNap -> {
-            val active = now.phase == SleepEngine.Phase.NAP && now.napIndex == item.nap.index
-            NapRow(item.nap, active = active, dim = item.past, onClick = { onEventKey(item.key) })
-            if (eventKey == item.key) {
-                NapEditor(
-                    nap = item.nap,
-                    onChange = { d -> onChangeNap(item.nap.index - 1, d) },
-                    onReset = { onResetNap(item.nap.index - 1) },
-                )
-            }
-        }
-        is TWindow -> {
-            val active = now.phase == SleepEngine.Phase.WINDOW && now.windowIndex == item.window.index
-            WindowRow(item.window, endClock = item.endClock, active = active, dim = item.past, onClick = { onEventKey(item.key) })
-            if (eventKey == item.key) {
-                WindowEditor(
-                    age = age,
-                    window = item.window,
-                    onChange = { d -> onChangeWw(item.window.index, d) },
-                    onReset = { onResetWw(item.window.index) },
-                )
-            }
-        }
-        is TFeed -> FeedRow(item.placement)
-    }
-}
-
-@Composable
-private fun NapRow(nap: SleepEngine.ScheduledNap, active: Boolean, dim: Boolean, onClick: () -> Unit) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
-            .background(if (active) ActiveBg else Color.Transparent)
-            .border(1.dp, if (active) ActiveBorder else Color.Transparent, RoundedCornerShape(10.dp))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 8.dp, vertical = 8.dp),
-    ) {
-        Icon(
-            resPainter(R.drawable.ic_moon),
-            contentDescription = null,
-            tint = if (dim) Subtitle else NightTint,
-            modifier = Modifier.size(16.dp),
-        )
-        Text(
-            "Сон ${nap.index}",
-            fontSize = 15.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = if (dim) Subtitle else DarkScheme.onSurface,
-        )
-        Spacer(Modifier.weight(1f))
-        Column(horizontalAlignment = Alignment.End) {
-            Text(
-                "${SleepEngine.fmtClock(nap.start)} – ${SleepEngine.fmtClock(nap.end)}",
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = if (dim) Subtitle else DarkScheme.primary,
-            )
-            Text(
-                SleepEngine.fmtDurHuman(nap.duration) +
-                    if (nap.offset != 0) " · ${if (nap.offset < 0) "−" else "+"}${abs(nap.offset)}" else "",
-                fontSize = 12.sp,
-                color = if (nap.offset != 0) Amber else DarkScheme.onSurfaceVariant,
-            )
-        }
-    }
-}
-
-@Composable
-private fun WindowRow(
-    window: SleepEngine.Window,
-    endClock: String,
-    active: Boolean,
-    dim: Boolean,
-    onClick: () -> Unit,
-) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp))
-            .background(if (active) ActiveBg else Color.Transparent)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 8.dp, vertical = 4.dp),
-    ) {
-        Icon(
-            resPainter(R.drawable.ic_clock),
-            contentDescription = null,
-            tint = if (dim) Subtitle else DarkScheme.onSurfaceVariant,
-            modifier = Modifier.size(14.dp),
-        )
-        Text("Бодрствование", fontSize = 13.sp, color = if (dim) Subtitle else DarkScheme.onSurfaceVariant)
-        if (window.hasManual) {
-            Text(
-                "${if (window.manual < 0) "−" else "+"}${abs(window.manual)}",
-                fontSize = 12.sp, color = Amber,
-            )
-        }
-        if (window.hasAuto) {
-            Text("авто", fontSize = 12.sp, color = Subtitle)
-        }
-        if (window.regime != 0) {
-            Text("регресс", fontSize = 12.sp, color = Amber)
-        }
-        Spacer(Modifier.weight(1f))
-        Text(
-            "${SleepEngine.fmtDurHuman(window.effective)} → $endClock",
-            fontSize = 13.sp,
-            color = if (dim) Subtitle else DarkScheme.onSurface,
-        )
-    }
-}
-
-@Composable
-private fun FeedRow(placement: SleepEngine.FeedPlacement) {
-    val note = when (placement.kind) {
-        SleepEngine.FeedKind.AT_WAKE -> "сразу после пробуждения"
-        SleepEngine.FeedKind.IN_WINDOW -> null
-        SleepEngine.FeedKind.IN_NAP -> "⚠ совпадает со Сном ${placement.slot}"
-        SleepEngine.FeedKind.BEFORE_WAKE -> "до подъёма"
-        SleepEngine.FeedKind.AFTER_BEDTIME -> "⚠ после отбоя — покормить до укладывания"
-        SleepEngine.FeedKind.NIGHT -> null
-    }
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 8.dp, vertical = 2.dp),
-    ) {
-        Icon(
-            resPainter(R.drawable.ic_bottle),
-            contentDescription = null,
-            tint = if (placement.isWarning) Amber else FeedTint,
-            modifier = Modifier.size(14.dp),
-        )
-        Text(
-            SleepEngine.fmtClock(placement.feed),
-            fontSize = 13.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = if (placement.isWarning) Amber else FeedTint,
-        )
-        Text("кормление", fontSize = 13.sp, color = DarkScheme.onSurfaceVariant)
-        if (note != null) {
-            Text(
-                note,
-                fontSize = 12.sp,
-                color = if (placement.isWarning) Amber else Subtitle,
-            )
-        }
-    }
-}
-
-@Composable
-private fun NightSection(
-    schedule: SleepEngine.Schedule,
-    placements: List<SleepEngine.FeedPlacement>,
-    now: SleepEngine.NowInfo,
-) {
-    val active = now.phase == SleepEngine.Phase.NIGHT
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(top = 4.dp)
-            .clip(RoundedCornerShape(12.dp))
-            .background(NightBg)
-            .border(1.dp, if (active) NightTint else NightBorder, RoundedCornerShape(12.dp))
-            .padding(12.dp),
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Icon(resPainter(R.drawable.ic_night), contentDescription = null, tint = NightTint, modifier = Modifier.size(16.dp))
-            Text("Ночь", fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.weight(1f))
-            Text(
-                "${SleepEngine.fmtClock(schedule.bedtime)} – ${SleepEngine.fmtClock(schedule.wake)}",
-                fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = NightTint,
-            )
-        }
-        Text(
-            SleepEngine.fmtDurHuman(schedule.nightSleep),
-            fontSize = 12.sp,
-            color = DarkScheme.onSurfaceVariant,
-            modifier = Modifier.align(Alignment.End),
-        )
-        val night = placements.filter { it.kind == SleepEngine.FeedKind.NIGHT }
-        val before = placements.filter { it.kind == SleepEngine.FeedKind.BEFORE_WAKE }
-        if (night.isNotEmpty() || before.isNotEmpty()) {
-            val text = buildString {
-                if (night.isNotEmpty()) {
-                    append("ночью: ")
-                    append(night.joinToString(" · ") { SleepEngine.fmtClock(it.feed) })
-                }
-                if (before.isNotEmpty()) {
-                    if (isNotEmpty()) append(" · ")
-                    append("до подъёма: ")
-                    append(before.joinToString(" · ") { SleepEngine.fmtClock(it.feed) })
-                }
-            }
-            Text(
-                "Кормления — $text",
-                fontSize = 12.sp,
-                color = FeedTint,
-                modifier = Modifier.padding(top = 4.dp),
-            )
-        }
-    }
-}
+private fun feedTimeInNap(time: Int, nap: SleepEngine.ScheduledNap): Boolean =
+    time >= nap.start && time < nap.end
 
 // ══════════════════════════ РЕДАКТОРЫ ═════════════════════════════════════
 
@@ -1550,6 +1271,7 @@ private fun IconPressable(icon: Int, label: String, a11y: String, onClick: () ->
     Pressable(
         shape = RoundedCornerShape(50),
         container = DarkScheme.surfaceVariant,
+        modifier = Modifier.size(48.dp),
         onClick = onClick,
         a11y = a11y,
     ) {

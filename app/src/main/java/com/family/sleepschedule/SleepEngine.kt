@@ -16,6 +16,31 @@ package com.family.sleepschedule
  */
 object SleepEngine {
 
+    enum class EventKind { WAKE, NAP_START, NAP_END, FEED, BEDTIME }
+
+    /** Единая хронология от подъёма до следующего подъёма, включая ночь. */
+    data class DayEvent(val time: Int, val kind: EventKind, val index: Int = 0)
+
+    fun timeline(s: Schedule, feeds: List<Int>): List<DayEvent> = buildList {
+        add(DayEvent(s.wake, EventKind.WAKE))
+        s.naps.forEach { nap ->
+            add(DayEvent(nap.start, EventKind.NAP_START, nap.index))
+            add(DayEvent(nap.end, EventKind.NAP_END, nap.index))
+        }
+        add(DayEvent(s.bedtime, EventKind.BEDTIME))
+        val wakeTod = ((s.wake % 1440) + 1440) % 1440
+        feeds.forEachIndexed { index, feed ->
+            val relative = ((feed - wakeTod) % 1440 + 1440) % 1440
+            add(DayEvent(s.wake + relative, EventKind.FEED, index))
+        }
+    }.sortedWith(compareBy<DayEvent> { it.time }.thenBy {
+        when (it.kind) {
+            EventKind.WAKE, EventKind.NAP_END -> 0
+            EventKind.NAP_START, EventKind.BEDTIME -> 1
+            EventKind.FEED -> 2
+        }
+    })
+
     /** Схема на фиксированное число дневных снов. */
     data class NapPlan(
         val name: String,

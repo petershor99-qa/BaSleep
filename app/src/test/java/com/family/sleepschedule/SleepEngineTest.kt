@@ -309,4 +309,50 @@ class SleepEngineTest {
         assertEquals("через 14 мин", SleepEngine.fmtIn(14))
         assertEquals("через 1 ч 20 мин", SleepEngine.fmtIn(80))
     }
+
+    @Test
+    fun `кормления между снами стоят в хронологии а не после следующего сна`() {
+        val s = SleepEngine.build(age3, age3.plans[0], 9 * 60)
+        val events = SleepEngine.timeline(s, listOf(18 * 60, 15 * 60, 21 * 60))
+        assertEquals(events.map { it.time }.sorted(), events.map { it.time })
+        val feed18 = events.indexOfFirst { it.kind == SleepEngine.EventKind.FEED && it.time == 1080 }
+        val nap4 = events.indexOfFirst { it.kind == SleepEngine.EventKind.NAP_START && it.index == 4 }
+        assertTrue(feed18 < nap4)
+        assertEquals(3, events.count { it.kind == SleepEngine.EventKind.FEED })
+    }
+
+    @Test
+    fun `кормление внутри сна находится между началом и пробуждением`() {
+        val s = SleepEngine.build(age3, age3.plans[0], 540)
+        val nap = s.naps[1]
+        val events = SleepEngine.timeline(s, listOf(nap.start + 5))
+        val start = events.indexOfFirst { it.kind == SleepEngine.EventKind.NAP_START && it.index == 2 }
+        val feed = events.indexOfFirst { it.kind == SleepEngine.EventKind.FEED }
+        val end = events.indexOfFirst { it.kind == SleepEngine.EventKind.NAP_END && it.index == 2 }
+        assertTrue(start < feed && feed < end)
+    }
+
+    @Test
+    fun `ночные и утренние кормления не теряются после полуночи`() {
+        val s = SleepEngine.build(age3, age3.plans[0], 545)
+        val events = SleepEngine.timeline(s, listOf(0, 270, 540, 545, 1320))
+        assertEquals(listOf(545, 1320, 1440, 1710, 1980),
+            events.filter { it.kind == SleepEngine.EventKind.FEED }.map { it.time })
+        assertTrue(events.first().kind == SleepEngine.EventKind.WAKE)
+    }
+
+    @Test
+    fun `на границе сна пробуждение показано перед кормлением для всех схем`() {
+        for (age in SleepEngine.AGES) for (plan in age.plans) {
+            val s = SleepEngine.build(age, plan, 540)
+            val feeds = s.naps.map { it.end % 1440 }
+            val events = SleepEngine.timeline(s, feeds)
+            assertEquals(2 * plan.naps + feeds.size + 2, events.size)
+            s.naps.forEach { nap ->
+                val atEnd = events.filter { it.time == nap.end }
+                assertEquals(SleepEngine.EventKind.NAP_END, atEnd.first().kind)
+                assertEquals(SleepEngine.EventKind.FEED, atEnd.last().kind)
+            }
+        }
+    }
 }
