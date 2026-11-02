@@ -5,7 +5,8 @@ import android.content.SharedPreferences
 /**
  * Чтение/применение сохранённого состояния — общее для приложения и виджета.
  * Хранится всё: возраст, схема, время пробуждения, кормления, факты снов,
- * правки ВБ, режим регресса.
+ * ручные правки окон, режим регресса. Режим регресса хранится ОТДЕЛЬНО
+ * от ручных правок и в wwOffsets не попадает.
  */
 object Prefs {
     const val NAME = "sleep_schedule"
@@ -30,12 +31,8 @@ object Prefs {
 
     fun loadRegress(prefs: SharedPreferences): Boolean = prefs.getBoolean("regress", false)
 
-    /** Регресс сна: все окна бодрствования минус REGRESS_STEP минут. */
-    fun withRegress(adj: SleepEngine.Adjustments, regress: Boolean): SleepEngine.Adjustments =
-        if (!regress) adj
-        else adj.copy(wwOffsets = adj.wwOffsets.map { it - SleepEngine.REGRESS_STEP })
-
-    /** Полный расчёт дня из сохранённого состояния — для виджета. */
+    /** Полный расчёт дня из сохранённого состояния — для виджета.
+     *  Старые значения за границами коридора приводятся sanitizeAdj. */
     fun buildSchedule(prefs: SharedPreferences): SleepEngine.Schedule? {
         val ageIdx = prefs.getInt("age", 0)
         val planIdx = prefs.getInt("plan", 0)
@@ -44,7 +41,8 @@ object Prefs {
         if (planIdx !in age.plans.indices) return null
         val plan = age.plans[planIdx]
         val wake = prefs.getInt("wake", 9 * 60)
-        val adj = withRegress(loadAdj(prefs, plan), loadRegress(prefs))
-        return SleepEngine.build(age, plan, wake, adj)
+        val regress = loadRegress(prefs)
+        val adj = SleepEngine.sanitizeAdj(age, plan, loadAdj(prefs, plan), regress)
+        return SleepEngine.build(age, plan, wake, adj, regress)
     }
 }
