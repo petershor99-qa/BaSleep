@@ -221,9 +221,13 @@ fun App(prefs: SharedPreferences, version: String) {
         } else error = "Не удалось сохранить настройки"
     }
     val night = state.phase == LiveTracker.Phase.NIGHT || state.phase == LiveTracker.Phase.NIGHT_AWAKE
-    val accent by animateColorAsState(if (state.phase == LiveTracker.Phase.NAP || night) NightTint else DarkScheme.primary, label = "stateColor")
     val localHour = java.time.Instant.ofEpochMilli(now).atZone(java.time.ZoneId.systemDefault()).hour
     val nightAvailable = localHour >= 21 || localHour < 6
+    val nightSleepNow = state.phase == LiveTracker.Phase.AWAKE && nightAvailable
+    val accent by animateColorAsState(
+        if (state.phase == LiveTracker.Phase.NAP || night || nightSleepNow) NightTint else DarkScheme.primary,
+        label = "stateColor",
+    )
     DisposableEffect(dim) {
         val window = (context as? Activity)?.window
         val before = window?.attributes?.screenBrightness ?: -1f
@@ -299,18 +303,64 @@ fun App(prefs: SharedPreferences, version: String) {
                             Text("С ${clock(state.since)}" + daySuffix(state.since, now), color = Subtitle, fontSize = 14.sp)
                         } else Text("Нажми, когда начнётся ваш день", fontSize = 14.sp, color = Subtitle)
                     }
+                    if (state.phase == LiveTracker.Phase.READY) {
+                        var baseOpen by rememberSaveable { mutableStateOf(false) }
+                        val base = remember(age, plan) {
+                            SleepEngine.build(age, plan, prefs.getInt("wake", 9 * 60))
+                        }
+                        TextButton(onClick = { baseOpen = !baseOpen }) {
+                            Text(if (baseOpen) "Скрыть базовое расписание" else "Базовое расписание · ${plan.name}")
+                        }
+                        if (baseOpen) {
+                            Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(DarkScheme.surface).padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text("Подъём ${SleepEngine.fmtClock(base.wake)}", fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                                base.naps.forEach { nap ->
+                                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                        Text("Сон ${nap.index}", fontSize = 13.sp, color = NightTint)
+                                        Text(
+                                            "${SleepEngine.fmtClock(nap.start)}–${SleepEngine.fmtClock(nap.end)} · ${SleepEngine.fmtDurHuman(nap.duration)}",
+                                            fontSize = 13.sp, color = Subtitle,
+                                        )
+                                    }
+                                }
+                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                    Text("Ночь", fontSize = 13.sp, color = NightTint)
+                                    Text(
+                                        "${SleepEngine.fmtClock(base.bedtime)}–${SleepEngine.fmtClock(base.wake)} · ${SleepEngine.fmtDurHuman(base.nightSleep)}",
+                                        fontSize = 13.sp, color = Subtitle,
+                                    )
+                                }
+                                Text(
+                                    "После первого «Проснулся» прогноз построится от фактического времени.",
+                                    fontSize = 11.sp, color = Subtitle,
+                                )
+                            }
+                        }
+                    }
                     val morning = localHour >= 6 && localHour < 21
                     val startDayNow = state.phase == LiveTracker.Phase.NIGHT && morning
                     val action = when {
                         startDayNow -> "Начать день"
+                        nightSleepNow -> "Ночной сон"
                         state.phase == LiveTracker.Phase.READY ||
                             state.phase == LiveTracker.Phase.NAP ||
                             state.phase == LiveTracker.Phase.NIGHT -> "Проснулся"
                         else -> "Уснул"
                     }
                     Pressable(RoundedCornerShape(24.dp), accent, Modifier.fillMaxWidth().heightIn(min = 72.dp),
-                        a11y = if (startDayNow) "Начать день — записать пробуждение" else "$action — записать время телефона",
-                        onClick = { if (startDayNow) act(LiveTracker::startDay) else act(LiveTracker::toggle) }) {
+                        a11y = when {
+                            startDayNow -> "Начать день — записать пробуждение"
+                            nightSleepNow -> "Ночной сон — записать уход в ночь"
+                            else -> "$action — записать время телефона"
+                        },
+                        onClick = {
+                            when {
+                                startDayNow -> act(LiveTracker::startDay)
+                                nightSleepNow -> act(LiveTracker::startNight)
+                                else -> act(LiveTracker::toggle)
+                            }
+                        }) {
                         Text(action, fontSize = 24.sp, color = DarkScheme.onPrimary, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(18.dp))
                     }
                     if (state.phase != LiveTracker.Phase.READY) {
@@ -319,9 +369,14 @@ fun App(prefs: SharedPreferences, version: String) {
                             if (night && startDayNow) {
                                 TextButton(onClick = { act(LiveTracker::toggle) }) { Text("Проснулся ночью") }
                             }
-                            if (!night && nightAvailable) {
-                                TextButton(onClick = { act(LiveTracker::startNight) }) { Text("Ночной сон", color = NightTint) }
+                            if (state.phase == LiveTracker.Phase.NAP) {
+                                TextButton(onClick = { act(LiveTracker::startNight) }) {
+                                    Text("Ночной сон (сохранит начало)", color = NightTint)
+                                }
                             }
+                        }
+                        FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            TextButton(onClick = { resetDay() }) { Text("Начать заново") }
                         }
                     }
                     val longRunning = state.phase != LiveTracker.Phase.READY &&
