@@ -176,7 +176,8 @@ fun App(prefs: SharedPreferences, version: String) {
     LaunchedEffect(Unit) {
         while (true) {
             now = System.currentTimeMillis()
-            delay(1000L)
+            val sec = Calendar.getInstance().get(Calendar.SECOND)
+            delay(((60 - sec) * 1000L + 50L).coerceAtLeast(200L))
         }
     }
     BackHandler(settings || dim || editor || planOpen) {
@@ -208,6 +209,10 @@ fun App(prefs: SharedPreferences, version: String) {
             val next = change(state, System.currentTimeMillis())
             store(Prefs.Session(next, state), "Записано ${clock(next.since)}")
         } catch (e: IllegalArgumentException) { error = e.message ?: "Проверь время телефона" }
+    }
+    fun resetDay() {
+        if (state.phase == LiveTracker.Phase.READY) return
+        store(Prefs.Session(LiveTracker.State(), state), "День сброшен")
     }
     fun config(newAge: Int = ageIndex, newPlan: Int = planIndex, newRegress: Boolean = regress, newFeeds: List<Int> = feeds) {
         if (prefs.edit().putInt("age", newAge).putInt("plan", newPlan)
@@ -241,6 +246,10 @@ fun App(prefs: SharedPreferences, version: String) {
                         "Настройки", if (settings) "Вернуться к трекеру" else "Открыть настройки") { settings = !settings; editor = false }
                 }
                 if (error != null) Text(error!!, color = Amber, fontSize = 14.sp)
+                if (session.corrupt) Text(
+                    "Не удалось прочитать предыдущее состояние — начали с чистого листа",
+                    color = Amber, fontSize = 13.sp,
+                )
                 if (settings) {
                     Text("Схема для прогноза", fontSize = 16.sp)
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -263,6 +272,9 @@ fun App(prefs: SharedPreferences, version: String) {
                     }
                     if (state.phase == LiveTracker.Phase.AWAKE || state.phase == LiveTracker.Phase.NAP) {
                         FactPill("Начать ночной сон", { settings = false; act(LiveTracker::startNight) })
+                    }
+                    TextButton(onClick = { resetDay() }) {
+                        Text(if (state.phase == LiveTracker.Phase.READY) "Запись уже чистая" else "Начать новый день (сброс записи)")
                     }
                     TextButton(onClick = { dim = !dim; settings = false }) { Text(if (dim) "Обычная яркость" else "Тусклый экран") }
                     TextButton(onClick = {
@@ -287,21 +299,40 @@ fun App(prefs: SharedPreferences, version: String) {
                             Text("С ${clock(state.since)}" + daySuffix(state.since, now), color = Subtitle, fontSize = 14.sp)
                         } else Text("Нажми, когда начнётся ваш день", fontSize = 14.sp, color = Subtitle)
                     }
-                    val action = when (state.phase) {
-                        LiveTracker.Phase.READY, LiveTracker.Phase.NAP, LiveTracker.Phase.NIGHT -> "Проснулся"
+                    val morning = localHour >= 6 && localHour < 21
+                    val startDayNow = state.phase == LiveTracker.Phase.NIGHT && morning
+                    val action = when {
+                        startDayNow -> "Начать день"
+                        state.phase == LiveTracker.Phase.READY ||
+                            state.phase == LiveTracker.Phase.NAP ||
+                            state.phase == LiveTracker.Phase.NIGHT -> "Проснулся"
                         else -> "Уснул"
                     }
                     Pressable(RoundedCornerShape(24.dp), accent, Modifier.fillMaxWidth().heightIn(min = 72.dp),
-                        a11y = "$action — записать время телефона", onClick = { act(LiveTracker::toggle) }) {
+                        a11y = if (startDayNow) "Начать день — записать пробуждение" else "$action — записать время телефона",
+                        onClick = { if (startDayNow) act(LiveTracker::startDay) else act(LiveTracker::toggle) }) {
                         Text(action, fontSize = 24.sp, color = DarkScheme.onPrimary, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(18.dp))
                     }
                     if (state.phase != LiveTracker.Phase.READY) {
                         FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                             TextButton(onClick = { editor = !editor }) { Text("Исправить время") }
+                            if (night && startDayNow) {
+                                TextButton(onClick = { act(LiveTracker::toggle) }) { Text("Проснулся ночью") }
+                            }
                             if (!night && nightAvailable) {
                                 TextButton(onClick = { act(LiveTracker::startNight) }) { Text("Ночной сон", color = NightTint) }
                             }
                         }
+                    }
+                    val longRunning = state.phase != LiveTracker.Phase.READY &&
+                        now - state.since >= 16L * 60 * 60_000
+                    if (longRunning) {
+                        FactPill(
+                            "Начать новый день (сброс записи)",
+                            { resetDay() },
+                            Modifier.fillMaxWidth(),
+                            a11y = "Сбросить запись дня и начать заново",
+                        )
                     }
                     if (editor) ClockEditor(
                         java.time.Instant.ofEpochMilli(state.since).atZone(java.time.ZoneId.systemDefault()).hour,

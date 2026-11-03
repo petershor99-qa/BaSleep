@@ -46,7 +46,12 @@ object Prefs {
         return SleepEngine.build(age, plan, wake, adj, regress)
     }
 
-    data class Session(val state: LiveTracker.State, val undo: LiveTracker.State? = null)
+    data class Session(
+        val state: LiveTracker.State,
+        val undo: LiveTracker.State? = null,
+        /** true — сохранённая сессия была повреждена и не прочиталась. */
+        val corrupt: Boolean = false,
+    )
     private fun encode(s: LiveTracker.State) = org.json.JSONObject().apply {
         put("phase", s.phase.name); put("since", s.since); put("previousAt", s.previousAt)
         put("dayStart", s.dayStart); put("completedNaps", s.completedNaps)
@@ -60,10 +65,15 @@ object Prefs {
         require(s.previousAt <= s.since)
         return s
     }
-    fun loadLive(prefs: SharedPreferences): Session = try {
-        val j = org.json.JSONObject(prefs.getString("live_session", null) ?: "{}")
-        Session(decode(j.getJSONObject("state")), if (j.isNull("undo")) null else decode(j.getJSONObject("undo")))
-    } catch (_: Exception) { Session(LiveTracker.State()) }
+    fun loadLive(prefs: SharedPreferences): Session {
+        val raw = prefs.getString("live_session", null) ?: return Session(LiveTracker.State())
+        return try {
+            val j = org.json.JSONObject(raw)
+            Session(decode(j.getJSONObject("state")), if (j.isNull("undo")) null else decode(j.getJSONObject("undo")))
+        } catch (_: Exception) {
+            Session(LiveTracker.State(), corrupt = true)
+        }
+    }
 
     /** Одна атомарная запись: состояние и однократная отмена, без истории. */
     fun saveLive(prefs: SharedPreferences, session: Session): Boolean = prefs.edit().putString("live_session",
