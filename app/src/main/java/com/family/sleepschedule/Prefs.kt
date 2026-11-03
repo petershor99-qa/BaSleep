@@ -45,4 +45,28 @@ object Prefs {
         val adj = SleepEngine.sanitizeAdj(age, plan, loadAdj(prefs, plan), regress)
         return SleepEngine.build(age, plan, wake, adj, regress)
     }
+
+    data class Session(val state: LiveTracker.State, val undo: LiveTracker.State? = null)
+    private fun encode(s: LiveTracker.State) = org.json.JSONObject().apply {
+        put("phase", s.phase.name); put("since", s.since); put("previousAt", s.previousAt)
+        put("dayStart", s.dayStart); put("completedNaps", s.completedNaps)
+        put("lastNapMinutes", s.lastNapMinutes ?: org.json.JSONObject.NULL); put("nightStart", s.nightStart)
+    }
+    private fun decode(j: org.json.JSONObject): LiveTracker.State {
+        val s = LiveTracker.State(LiveTracker.Phase.valueOf(j.getString("phase")), j.getLong("since"),
+            j.getLong("previousAt"), j.getLong("dayStart"), j.getInt("completedNaps"),
+            if (j.isNull("lastNapMinutes")) null else j.getInt("lastNapMinutes"), j.getLong("nightStart"))
+        require(s.completedNaps >= 0 && s.since >= 0 && s.previousAt >= 0)
+        require(s.previousAt <= s.since)
+        return s
+    }
+    fun loadLive(prefs: SharedPreferences): Session = try {
+        val j = org.json.JSONObject(prefs.getString("live_session", null) ?: "{}")
+        Session(decode(j.getJSONObject("state")), if (j.isNull("undo")) null else decode(j.getJSONObject("undo")))
+    } catch (_: Exception) { Session(LiveTracker.State()) }
+
+    /** Одна атомарная запись: состояние и однократная отмена, без истории. */
+    fun saveLive(prefs: SharedPreferences, session: Session): Boolean = prefs.edit().putString("live_session",
+        org.json.JSONObject().put("state", encode(session.state))
+            .put("undo", session.undo?.let { encode(it) } ?: org.json.JSONObject.NULL).toString()).commit()
 }

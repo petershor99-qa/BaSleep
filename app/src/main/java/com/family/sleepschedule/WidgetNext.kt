@@ -21,18 +21,21 @@ class WidgetNext : AppWidgetProvider() {
         appWidgetIds: IntArray,
     ) {
         val prefs = context.getSharedPreferences(Prefs.NAME, Context.MODE_PRIVATE)
-        val s = Prefs.buildSchedule(prefs) ?: return
-        val cal = Calendar.getInstance()
-        val nowTod = cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE)
-        val info = SleepEngine.nowInfo(s, nowTod)
-
-        val main = when (info.phase) {
-            SleepEngine.Phase.NAP -> "😴 Сон ${info.napIndex}"
-            SleepEngine.Phase.WINDOW -> "⏱ Бодрствование"
-            SleepEngine.Phase.NIGHT -> "🌃 Ночь"
+        val state = Prefs.loadLive(prefs).state
+        val age = SleepEngine.AGES[prefs.getInt("age", 0).coerceIn(SleepEngine.AGES.indices)]
+        val plan = age.plans[prefs.getInt("plan", 0).coerceIn(age.plans.indices)]
+        val next = LiveTracker.forecasts(state, age, plan, Prefs.loadRegress(prefs)).firstOrNull()
+        val main = when (state.phase) {
+            LiveTracker.Phase.READY -> "Нажми «Проснулся» в приложении"
+            LiveTracker.Phase.AWAKE -> "Бодрствует"
+            LiveTracker.Phase.NAP -> "Спит"
+            LiveTracker.Phase.NIGHT -> "Ночной сон"
+            LiveTracker.Phase.NIGHT_AWAKE -> "Проснулся ночью"
         }
-        val sub = "${info.nextLabel} в ${SleepEngine.fmtClock(info.nextAbs)} " +
-            "(через ${if (info.minutesLeft < 60) "${info.minutesLeft} мин" else SleepEngine.fmtDur(info.minutesLeft)})"
+        val formatter = java.time.format.DateTimeFormatter.ofPattern("HH:mm")
+        fun clock(at: Long) = java.time.Instant.ofEpochMilli(at).atZone(java.time.ZoneId.systemDefault()).format(formatter)
+        val sub = if (next != null) "${next.title} · ${clock(next.at)} · ориентир"
+            else if (state.phase != LiveTracker.Phase.READY) "С ${clock(state.since)}" else "Время запишется с телефона"
 
         val views = RemoteViews(context.packageName, R.layout.widget_next).apply {
             setTextViewText(R.id.widget_title, "Режим сна")

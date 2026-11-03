@@ -499,3 +499,113 @@ object SleepEngine {
         if (minutes % 60 == 0) (minutes / 60).toString()
         else String.format("%.1f", minutes / 60.0).replace('.', ',')
 }
+
+
+/** Текущая сессия без журнала и статистики. Факты никогда не клэмпятся нормами. */
+object LiveTracker {
+    const val MINUTE = 60_000L
+    enum class Phase { READY, AWAKE, NAP, NIGHT, NIGHT_AWAKE }
+    data class State(
+        val phase: Phase = Phase.READY,
+        val since: Long = 0,
+        val previousAt: Long = 0,
+        val dayStart: Long = 0,
+        val completedNaps: Int = 0,
+        val lastNapMinutes: Int? = null,
+        val nightStart: Long = 0,
+    )
+    data class Forecast(val at: Long, val title: String)
+    fun minute(time: Long): Long = Math.floorDiv(time, MINUTE) * MINUTE
+    fun toggle(s: State, time: Long): State {
+        val at = minute(time)
+        require(s.phase == Phase.READY || at >= s.since) { "Время телефона раньше начала события" }
+        return when (s.phase) {
+            Phase.READY -> State(Phase.AWAKE, at, dayStart = at)
+            Phase.AWAKE -> s.copy(phase = Phase.NAP, since = at, previousAt = s.since)
+            Phase.NAP -> s.copy(phase = Phase.AWAKE, since = at, previousAt = s.since,
+                completedNaps = s.completedNaps + 1, lastNapMinutes = ((at - s.since) / MINUTE).toInt())
+            Phase.NIGHT -> s.copy(phase = Phase.NIGHT_AWAKE, since = at, previousAt = s.since)
+            Phase.NIGHT_AWAKE -> s.copy(phase = Phase.NIGHT, since = at, previousAt = s.since)
+        }
+    }
+    fun startNight(s: State, time: Long): State {
+        require(s.phase == Phase.AWAKE || s.phase == Phase.NAP)
+        val at = if (s.phase == Phase.NAP) s.since else minute(time)
+        require(at >= s.since)
+        return s.copy(phase = Phase.NIGHT, since = at, nightStart = at,
+            previousAt = if (s.phase == Phase.NAP) s.previousAt else s.since)
+    }
+    fun startDay(s: State, time: Long): State {
+        require(s.phase == Phase.NIGHT || s.phase == Phase.NIGHT_AWAKE)
+        val at = if (s.phase == Phase.NIGHT_AWAKE) s.since else minute(time)
+        require(at >= s.since)
+        return State(phase = Phase.AWAKE, since = at, dayStart = at)
+    }
+    /** Последнее прошедшее вхождение часов/минут; переход через полночь явный. */
+    fun clockTime(hour: Int, minute: Int, now: Long, zone: java.time.ZoneId): Long {
+        require(hour in 0..23 && minute in 0..59) { "Укажи часы 00–23 и минуты 00–59" }
+        val current = java.time.Instant.ofEpochMilli(now).atZone(zone)
+        var selected = current.toLocalDate().atTime(hour, minute).atZone(zone)
+        if (selected.toInstant().toEpochMilli() > now) selected = selected.minusDays(1)
+        return selected.toInstant().toEpochMilli()
+    }
+    fun correct(s: State, at: Long, now: Long): State {
+        require(s.phase != Phase.READY)
+        val value = minute(at)
+        require(value <= minute(now)) { "Нельзя записать будущее время" }
+        require(s.previousAt == 0L || value >= s.previousAt) { "Это раньше предыдущего события" }
+        return s.copy(since = value,
+            dayStart = if (s.since == s.dayStart) value else s.dayStart,
+            nightStart = if (s.since == s.nightStart) value else s.nightStart,
+            lastNapMinutes = if (s.phase == Phase.AWAKE && s.completedNaps > 0)
+                ((value - s.previousAt) / MINUTE).toInt() else s.lastNapMinutes)
+    }
+    fun forecasts(s: State, age: SleepEngine.Age, plan: SleepEngine.NapPlan, regress: Boolean): List<Forecast> {
+        if (s.phase == Phase.READY || s.phase == Phase.NIGHT_AWAKE) return emptyList()
+        val regime = if (regress) SleepEngine.REGRESS_STEP else 0
+        if (s.phase == Phase.NIGHT) {
+            val night = 1440 - plan.wakeWindows.sum() - plan.napDurations.sum()
+            return listOf(Forecast(s.nightStart + night * MINUTE, "Утренний подъём"))
+        }
+        val result = mutableListOf<Forecast>()
+        var cursor = s.since
+        var index = s.completedNaps.coerceAtMost(plan.naps)
+        if (s.phase == Phase.NAP) {
+            val duration = plan.napDurations.getOrElse(index) { plan.napDurations.last() }
+            cursor += duration * MINUTE
+            result += Forecast(cursor, "Пробуждение")
+            index++
+            if (index > plan.naps) result += Forecast(cursor + plan.wakeWindows.last() * MINUTE, "Ночной сон")
+        }
+        var firstWindow = true
+        while (index <= plan.naps) {
+            val base = plan.wakeWindows[index.coerceAtMost(plan.naps)]
+            val comp = if (firstWindow && s.phase == Phase.AWAKE && s.completedNaps > 0 && s.lastNapMinutes != null) {
+                (s.lastNapMinutes - plan.napDurations[(s.completedNaps - 1).coerceAtMost(plan.naps - 1)])
+                    .coerceIn(-SleepEngine.COMP_MAX, SleepEngine.COMP_MAX)
+            } else 0
+            val window = (base + comp - regime).coerceIn(age.hardMin, age.hardMax)
+            cursor += window * MINUTE
+            if (index >= plan.naps) {
+                result += Forecast(cursor, "Ночной сон")
+                break
+            }
+            result += Forecast(cursor, "Сон ${index + 1}")
+            cursor += plan.napDurations[index] * MINUTE
+            result += Forecast(cursor, "Пробуждение")
+            index++
+            firstWindow = false
+        }
+        // Дополнительный дневной сон не блокируется даже после конца выбранной схемы.
+        if (result.isEmpty()) result += Forecast(cursor + plan.wakeWindows.last() * MINUTE, "Ночной сон")
+        return result
+    }
+    fun nextFeed(feeds: List<Int>, now: Long, zone: java.time.ZoneId): Long? {
+        val today = java.time.Instant.ofEpochMilli(now).atZone(zone).toLocalDate()
+        return feeds.filter { it in 0..1439 }.map { f ->
+            var at = today.atTime(f / 60, f % 60).atZone(zone)
+            if (at.toInstant().toEpochMilli() < minute(now)) at = at.plusDays(1)
+            at.toInstant().toEpochMilli()
+        }.minOrNull()
+    }
+}

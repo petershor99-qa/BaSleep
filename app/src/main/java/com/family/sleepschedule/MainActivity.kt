@@ -21,11 +21,15 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -44,6 +48,8 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -55,6 +61,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -71,6 +78,7 @@ import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -136,1089 +144,262 @@ private val ActiveBorder = Color(0xFF9BB8FF)
 private val ActiveBg = Color(0x1A9BB8FF)
 private val MutedBg = Color(0xFF12161F)
 
-/** Одноразовая отмена последнего действия. */
-private class UndoState(val label: String, val restore: () -> Unit)
+private fun clock(time: Long): String = java.time.Instant.ofEpochMilli(time)
+    .atZone(java.time.ZoneId.systemDefault()).format(java.time.format.DateTimeFormatter.ofPattern("HH:mm"))
 
-private fun nowMinutesOfDay(): Int {
-    val cal = Calendar.getInstance()
-    return cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE)
-}
-
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun App(prefs: SharedPreferences, version: String) {
-    var ageIdx by remember { mutableIntStateOf(prefs.getInt("age", 0)) }
-    var planIdx by remember { mutableIntStateOf(prefs.getInt("plan", 0)) }
-    var wake by remember { mutableIntStateOf(prefs.getInt("wake", 9 * 60)) }
-    var feeds by remember { mutableStateOf(Prefs.loadFeeds(prefs)) }
+    var session by remember { mutableStateOf(Prefs.loadLive(prefs)) }
+    var ageIndex by remember { mutableIntStateOf(prefs.getInt("age", 0).coerceIn(SleepEngine.AGES.indices)) }
+    var planIndex by remember { mutableIntStateOf(prefs.getInt("plan", 0)) }
     var regress by remember { mutableStateOf(Prefs.loadRegress(prefs)) }
-
-    var nightMode by remember { mutableStateOf(false) }
-    var settingsOpen by rememberSaveable { mutableStateOf(false) }
-
-    val age = SleepEngine.AGES[ageIdx.coerceIn(SleepEngine.AGES.indices)]
-    val plan = age.plans[planIdx.coerceIn(age.plans.indices)]
-
-    // Ручные правки: грузим один раз (со старыми значениями за границей —
-    // приведёт sanitizeAdj), дальше любые изменения идут через setAdj.
-    var adj by remember { mutableStateOf(SleepEngine.Adjustments()) }
-    var adjLoaded by remember { mutableStateOf(false) }
-    if (!adjLoaded) {
-        adj = SleepEngine.sanitizeAdj(age, plan, Prefs.loadAdj(prefs, plan), regress)
-        adjLoaded = true
-    }
-    fun setAdj(new: SleepEngine.Adjustments) {
-        adj = SleepEngine.sanitizeAdj(age, plan, new, regress)
-    }
-
-    val schedule = remember(plan, wake, adj, regress) {
-        SleepEngine.build(age, plan, wake, adj, regress)
-    }
-    val placements = remember(schedule, feeds) { SleepEngine.placeFeeds(schedule, feeds) }
-
-    // Текущее время: на границе минуты + при возврате приложения на экран.
-    var nowMin by remember { mutableIntStateOf(nowMinutesOfDay()) }
-    val lifecycleOwner = LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner) {
-        val obs = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) nowMin = nowMinutesOfDay()
+    var feeds by remember { mutableStateOf(Prefs.loadFeeds(prefs)) }
+    var settings by rememberSaveable { mutableStateOf(false) }
+    var editor by rememberSaveable { mutableStateOf(false) }
+    var planOpen by rememberSaveable { mutableStateOf(false) }
+    var dim by rememberSaveable { mutableStateOf(false) }
+    var message by remember { mutableStateOf<String?>(null) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    var lastTap by remember { mutableLongStateOf(0L) }
+    val context = LocalContext.current
+    val focus = LocalFocusManager.current
+    val owner = LocalLifecycleOwner.current
+    DisposableEffect(owner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) now = System.currentTimeMillis()
         }
-        lifecycleOwner.lifecycle.addObserver(obs)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
+        owner.lifecycle.addObserver(observer)
+        onDispose { owner.lifecycle.removeObserver(observer) }
     }
     LaunchedEffect(Unit) {
         while (true) {
-            nowMin = nowMinutesOfDay()
-            val sec = Calendar.getInstance().get(Calendar.SECOND)
-            delay(((60 - sec) * 1000L + 60L).coerceAtLeast(200L))
+            now = System.currentTimeMillis()
+            delay(1000L)
         }
     }
-    val now = remember(schedule, nowMin) { SleepEngine.nowInfo(schedule, nowMin) }
-
-    // ── Состояние UI ────────────────────────────────────────────────────────
-    var undo by remember { mutableStateOf<UndoState?>(null) }
-    fun showUndo(label: String, restore: () -> Unit) {
-        undo = UndoState(label, restore)
+    BackHandler(settings || dim || editor || planOpen) {
+        when { editor -> editor = false; settings -> settings = false; dim -> dim = false; else -> planOpen = false }
     }
-
-    var wakeOpen by rememberSaveable { mutableStateOf(false) }
-    var eventKey by rememberSaveable { mutableStateOf<String?>(null) }
-    var pastOpen by rememberSaveable { mutableStateOf(false) }
-    var totalsOpen by rememberSaveable { mutableStateOf(false) }
-    var editingFeed by rememberSaveable { mutableIntStateOf(-1) }
-
-    // ── Действия ───────────────────────────────────────────────────────────
-    fun changeNap(i: Int, d: Int) {
-        setAdj(adj.copy(napOffsets = adj.napOffsets.toMutableList().also {
-            it[i] = (it[i] + d).coerceIn(
-                20 - plan.napDurations[i],
-                240 - plan.napDurations[i],
-            )
-        }))
+    val age = SleepEngine.AGES[ageIndex]
+    val plan = age.plans[planIndex.coerceIn(age.plans.indices)]
+    val state = session.state
+    val forecasts = remember(state, age, plan, regress) { LiveTracker.forecasts(state, age, plan, regress) }
+    fun updateWidget() {
+        val manager = AppWidgetManager.getInstance(context)
+        val ids = manager.getAppWidgetIds(ComponentName(context, WidgetNext::class.java))
+        if (ids.isNotEmpty()) context.sendBroadcast(Intent(context, WidgetNext::class.java)
+            .setAction(AppWidgetManager.ACTION_APPWIDGET_UPDATE)
+            .putExtra(AppWidgetManager.EXTRA_APPWIDGET_IDS, ids))
     }
-
-    fun resetNap(i: Int) = setAdj(adj.copy(napOffsets = adj.napOffsets.toMutableList().also { it[i] = 0 }))
-
-    fun changeWw(i: Int, d: Int) {
-        val range = SleepEngine.manualRange(age, plan, adj.napOffsets, if (regress) -SleepEngine.REGRESS_STEP else 0, i)
-        setAdj(adj.copy(wwOffsets = adj.wwOffsets.toMutableList().also {
-            it[i] = (it[i] + d).coerceIn(range.first, range.last)
-        }))
+    fun store(next: Prefs.Session, label: String) {
+        if (Prefs.saveLive(prefs, next)) {
+            session = next; message = label; error = null; editor = false; now = System.currentTimeMillis()
+            focus.clearFocus()
+            updateWidget()
+        } else error = "Не удалось сохранить. Попробуй ещё раз."
     }
-
-    fun resetWw(i: Int) = setAdj(adj.copy(wwOffsets = adj.wwOffsets.toMutableList().also { it[i] = 0 }))
-
-    fun resetPlan() {
-        val prev = adj
-        val prevEventKey = eventKey
-        setAdj(SleepEngine.Adjustments(List(plan.naps) { 0 }, List(plan.naps + 1) { 0 }))
-        eventKey = null
-        settingsOpen = false
-        showUndo("Базовый план восстановлен") {
-            setAdj(prev)
-            eventKey = prevEventKey
-        }
+    fun act(change: (LiveTracker.State, Long) -> LiveTracker.State) {
+        val tap = android.os.SystemClock.elapsedRealtime()
+        if (tap - lastTap < 900) return
+        lastTap = tap
+        try {
+            val next = change(state, System.currentTimeMillis())
+            store(Prefs.Session(next, state), "Записано ${clock(next.since)}")
+        } catch (e: IllegalArgumentException) { error = e.message ?: "Проверь время телефона" }
     }
-
-    fun selectAge(option: SleepEngine.Age) {
-        if (option === age) return  // повторный выбор — no-op, правки не трогаем
-        val prevAge = ageIdx
-        val prevPlan = planIdx
-        val prevAdj = adj
-        ageIdx = SleepEngine.AGES.indexOf(option)
-        planIdx = 0
-        adj = SleepEngine.Adjustments(
-            List(option.plans.first().naps) { 0 },
-            List(option.plans.first().naps + 1) { 0 },
-        )
-        showUndo("Возраст изменён — правки дня сброшены") {
-            ageIdx = prevAge; planIdx = prevPlan; adj = prevAdj
-        }
+    fun config(newAge: Int = ageIndex, newPlan: Int = planIndex, newRegress: Boolean = regress, newFeeds: List<Int> = feeds) {
+        if (prefs.edit().putInt("age", newAge).putInt("plan", newPlan)
+                .putBoolean("regress", newRegress).putString("feeds", newFeeds.joinToString(",")).commit()) {
+            ageIndex = newAge; planIndex = newPlan; regress = newRegress; feeds = newFeeds; updateWidget()
+        } else error = "Не удалось сохранить настройки"
     }
-
-    fun selectPlan(option: SleepEngine.NapPlan) {
-        if (option === plan) return
-        val prevPlan = planIdx
-        val prevAdj = adj
-        planIdx = age.plans.indexOf(option)
-        adj = SleepEngine.Adjustments(List(option.naps) { 0 }, List(option.naps + 1) { 0 })
-        showUndo("Схема изменена — правки дня сброшены") {
-            planIdx = prevPlan; adj = prevAdj
-        }
-    }
-
-    fun toggleRegress() {
-        regress = !regress
-        setAdj(adj)  // границы ручных правок сдвинулись — пересанитизировать
-    }
-
-    fun changeFeed(value: Int, d: Int) {
-        val nv = (((value + d) % 1440) + 1440) % 1440
-        feeds = feeds.toMutableList().also { list ->
-            val i = list.indexOf(value)
-            if (i >= 0) list[i] = nv
-        }.sorted()
-        editingFeed = nv  // редактор следует за значением, а не за индексом
-    }
-
-    fun resetFeeds() {
-        val prev = feeds
-        feeds = SleepEngine.DEFAULT_FEEDS
-        showUndo("Кормления сброшены на схему по умолчанию") { feeds = prev }
-    }
-
-    val context = LocalContext.current
-    fun shareDay() {
-        val text = SleepEngine.exportText(schedule, age, plan, feeds)
-        val send = Intent(Intent.ACTION_SEND).apply {
-            type = "text/plain"
-            putExtra(Intent.EXTRA_TEXT, text)
-        }
-        context.startActivity(Intent.createChooser(send, "Отправить расписание"))
-    }
-
-    // ── Сохранение + виджет ────────────────────────────────────────────────
-    LaunchedEffect(ageIdx, planIdx, wake) {
-        prefs.edit().putInt("age", ageIdx).putInt("plan", planIdx).putInt("wake", wake).apply()
-        pushWidget(context)
-    }
-    LaunchedEffect(feeds) {
-        prefs.edit().putString("feeds", feeds.joinToString(",")).apply()
-        pushWidget(context)
-    }
-    LaunchedEffect(adj) {
-        prefs.edit()
-            .putString("offsets", adj.napOffsets.joinToString(","))
-            .putString("ww", adj.wwOffsets.joinToString(","))
-            .apply()
-        pushWidget(context)
-    }
-    LaunchedEffect(regress) {
-        prefs.edit().putBoolean("regress", regress).apply()
-        pushWidget(context)
-    }
-
-    MaterialTheme(
-        colorScheme = DarkScheme,
-        typography = Typography(bodyLarge = TextStyle(fontFamily = Manrope)),
-    ) {
-        Surface(modifier = Modifier.fillMaxSize(), color = DarkScheme.background) {
-            BackHandler(enabled = nightMode || settingsOpen) {
-                if (nightMode) nightMode = false else settingsOpen = false
-            }
-            when {
-                nightMode -> NightScreen(schedule, nowMin, onExit = { nightMode = false })
-                settingsOpen -> SettingsScreen(
-                    age = age,
-                    plan = plan,
-                    feeds = feeds,
-                    regress = regress,
-                    version = version,
-                    editingFeed = editingFeed,
-                    onEditingFeed = { editingFeed = it },
-                    onSelectAge = ::selectAge,
-                    onSelectPlan = ::selectPlan,
-                    onToggleRegress = ::toggleRegress,
-                    onChangeFeed = ::changeFeed,
-                    onResetFeeds = ::resetFeeds,
-                    onResetPlan = ::resetPlan,
-                    onBack = { settingsOpen = false },
-                )
-                else -> MainScreen(
-                    schedule = schedule,
-                    age = age,
-                    plan = plan,
-                    now = now,
-                    nowMin = nowMin,
-                    feeds = feeds,
-                    placements = placements,
-                    undoLabel = undo?.label,
-                    onUndo = { undo?.restore(); undo = null },
-                    onDismissUndo = { undo = null },
-                    wakeOpen = wakeOpen,
-                    onWakeOpen = { wakeOpen = !wakeOpen },
-                    onWakeDelta = { d -> wake = (wake + d).coerceIn(300, 720) },
-                    eventKey = eventKey,
-                    onEventKey = { eventKey = if (eventKey == it) null else it },
-                    pastOpen = pastOpen,
-                    onPastOpen = { pastOpen = !pastOpen },
-                    totalsOpen = totalsOpen,
-                    onTotalsOpen = { totalsOpen = !totalsOpen },
-                    onChangeNap = ::changeNap,
-                    onResetNap = ::resetNap,
-                    onChangeWw = ::changeWw,
-                    onResetWw = ::resetWw,
-                    onOpenSettings = { settingsOpen = true },
-                    onNightMode = { nightMode = true },
-                    onShare = ::shareDay,
-                    onResetPlan = ::resetPlan,
-                )
-            }
-        }
-    }
-}
-
-private fun pushWidget(context: Context) {
-    val man = AppWidgetManager.getInstance(context) ?: return
-    val ids = man.getAppWidgetIds(ComponentName(context, WidgetNext::class.java))
-    if (ids.isEmpty()) return
-    val intent = Intent(context, WidgetNext::class.java).apply {
-        action = AppWidgetManager.ACTION_APPWIDGET_UPDATE
-        putExtra(AppWidgetManager.EXTRA_APPWIDGET_IDS, ids)
-    }
-    context.sendBroadcast(intent)
-}
-
-// ══════════════════════════ ГЛАВНЫЙ ЭКРАН ═════════════════════════════════
-
-@Composable
-private fun MainScreen(
-    schedule: SleepEngine.Schedule,
-    age: SleepEngine.Age,
-    plan: SleepEngine.NapPlan,
-    now: SleepEngine.NowInfo,
-    nowMin: Int,
-    feeds: List<Int>,
-    placements: List<SleepEngine.FeedPlacement>,
-    undoLabel: String?,
-    onUndo: () -> Unit,
-    onDismissUndo: () -> Unit,
-    wakeOpen: Boolean,
-    onWakeOpen: () -> Unit,
-    onWakeDelta: (Int) -> Unit,
-    eventKey: String?,
-    onEventKey: (String) -> Unit,
-    pastOpen: Boolean,
-    onPastOpen: () -> Unit,
-    totalsOpen: Boolean,
-    onTotalsOpen: () -> Unit,
-    onChangeNap: (Int, Int) -> Unit,
-    onResetNap: (Int) -> Unit,
-    onChangeWw: (Int, Int) -> Unit,
-    onResetWw: (Int) -> Unit,
-    onOpenSettings: () -> Unit,
-    onNightMode: () -> Unit,
-    onShare: () -> Unit,
-    onResetPlan: () -> Unit,
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .windowInsetsPadding(WindowInsets.safeDrawing),
-    ) {
-        Column(
-            modifier = Modifier
-                .weight(1f)
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 18.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            Spacer(Modifier.height(8.dp))
-
-            // Шапка: Сегодня + схема, справа вход в настройки
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("Сегодня", fontSize = 24.sp, fontWeight = FontWeight.Bold)
-                    Text(
-                        "${age.label} · ${plan.name}",
-                        fontSize = 13.sp,
-                        color = Subtitle,
-                    )
-                }
-                IconPressable(R.drawable.ic_share, "Поделиться", "Поделиться расписанием", onShare)
-                Spacer(Modifier.width(8.dp))
-                IconPressable(
-                    icon = R.drawable.ic_sliders,
-                    label = "Настройки",
-                    a11y = "Открыть настройки",
-                    onClick = onOpenSettings,
-                )
-            }
-
-            // Подъём — компактная строка с раскрывающимся редактором
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
-                    .clickable(onClick = onWakeOpen)
-                    .padding(vertical = 6.dp)
-                    .semantics { contentDescription = "Изменить время подъёма" },
-            ) {
-                Icon(
-                    resPainter(R.drawable.ic_sun),
-                    contentDescription = null,
-                    tint = Amber,
-                    modifier = Modifier.size(20.dp),
-                )
-                Text(
-                    "Подъём ${SleepEngine.fmtClock(schedule.wake)}",
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.weight(1f),
-                )
-                Text(
-                    if (wakeOpen) "Свернуть" else "Изменить",
-                    fontSize = 13.sp,
-                    color = ActiveBorder,
-                )
-            }
-            if (wakeOpen) {
-                WakeEditor(wake = schedule.wake, onDelta = onWakeDelta)
-            }
-
-            if (undoLabel != null) {
-                UndoBar(label = undoLabel, onUndo = onUndo, onDismiss = onDismissUndo)
-            }
-
-            HeroBlock(
-                schedule = schedule,
-                now = now,
-                onEditNap = { onEventKey("nap$it") },
-                onEditLastWindow = { onEventKey("ww${schedule.windows.lastIndex}") },
-                onEditWake = onWakeOpen,
-            )
-
-            if (schedule.hasFacts || schedule.regress) {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    if (schedule.hasFacts) {
-                        FactPill(
-                            "Вернуть базовый план",
-                            onResetPlan,
-                            modifier = Modifier.fillMaxWidth(),
-                            a11y = "Сбросить ручные правки снов и бодрствований, сохранив подъём, кормления и схему",
-                        )
-                        Text(
-                            "Сбросит правки снов и бодрствований. Подъём и кормления сохранятся.",
-                            fontSize = 12.sp, color = Subtitle,
-                        )
-                    }
-                    if (schedule.regress) {
-                        Text("Сокращение окон включено: −10 мин. При сбросе останется включённым.",
-                            fontSize = 12.sp, color = Amber)
-                    }
-                }
-            }
-
-            Timeline(
-                schedule = schedule,
-                age = age,
-                now = now,
-                placements = placements,
-                eventKey = eventKey,
-                onEventKey = onEventKey,
-                pastOpen = pastOpen,
-                onPastOpen = onPastOpen,
-                onChangeNap = onChangeNap,
-                onResetNap = onResetNap,
-                onChangeWw = onChangeWw,
-                onResetWw = onResetWw,
-            )
-
-            TotalsBlock(
-                schedule = schedule,
-                age = age,
-                open = totalsOpen,
-                onToggle = onTotalsOpen,
-            )
-
-            Spacer(Modifier.height(8.dp))
-        }
-
-        Surface(color = DarkScheme.surface, tonalElevation = 0.dp) {
-            Row(
-                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
-                    .clickable(onClick = onNightMode).padding(horizontal = 18.dp, vertical = 10.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(resPainter(R.drawable.ic_night), contentDescription = null,
-                    tint = NightTint, modifier = Modifier.size(18.dp))
-                Text("Ночной экран", fontSize = 14.sp, color = NightTint)
-            }
-        }
-    }
-}
-
-private fun Modifier.semanticsClick(desc: String): Modifier =
-    semantics { contentDescription = desc }
-
-@Composable
-private fun WakeEditor(wake: Int, onDelta: (Int) -> Unit) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
-            .background(MutedBg)
-            .padding(12.dp),
-    ) {
-        RollingText(
-            text = SleepEngine.fmtClock(wake),
-            fontSize = 34.sp,
-            fontWeight = FontWeight.Bold,
-            color = DarkScheme.primary,
-        )
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 6.dp)) {
-            StepButton("−1 ч", Modifier.weight(1f), "Уменьшить время подъёма на час") { onDelta(-60) }
-            StepButton("−5 мин", Modifier.weight(1f), "Уменьшить время подъёма на 5 минут") { onDelta(-5) }
-            StepButton("+5 мин", Modifier.weight(1f), "Увеличить время подъёма на 5 минут") { onDelta(5) }
-            StepButton("+1 ч", Modifier.weight(1f), "Увеличить время подъёма на час") { onDelta(60) }
-        }
-    }
-}
-
-@Composable
-private fun UndoBar(label: String, onUndo: () -> Unit, onDismiss: () -> Unit) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .background(AmberBg)
-            .padding(horizontal = 12.dp, vertical = 4.dp),
-    ) {
-        Text(label, fontSize = 13.sp, color = Amber, modifier = Modifier.weight(1f))
-        FactPill("Отменить", onUndo, a11y = "Отменить последнее действие")
-        Text("✕", fontSize = 15.sp, color = Amber,
-            modifier = Modifier
-                .clip(RoundedCornerShape(50))
-                .clickable(onClick = onDismiss)
-                .padding(horizontal = 8.dp, vertical = 10.dp))
-    }
-}
-
-/** Самый заметный блок: ближайшее событие. */
-@Composable
-private fun HeroBlock(
-    schedule: SleepEngine.Schedule,
-    now: SleepEngine.NowInfo,
-    onEditNap: (Int) -> Unit,
-    onEditLastWindow: () -> Unit,
-    onEditWake: () -> Unit,
-) {
-    val title: String
-    val time: Int
-    val onEdit: () -> Unit
-    when (now.phase) {
-        SleepEngine.Phase.NAP -> {
-            title = "По плану сейчас сон ${now.napIndex}"
-            time = now.nextAbs
-            onEdit = { onEditNap(now.napIndex) }
-        }
-        SleepEngine.Phase.WINDOW -> {
-            val nap = schedule.naps.firstOrNull { it.start == now.nextAbs }
-            title = if (nap != null) "Следующий сон по плану" else "Ночной сон по плану"
-            time = now.nextAbs
-            onEdit = if (nap != null) ({ onEditNap(nap.index) }) else onEditLastWindow
-        }
-        SleepEngine.Phase.NIGHT -> {
-            title = "По плану сейчас ночь"
-            time = schedule.wake
-            onEdit = onEditWake
-        }
-    }
-    Column(
-        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp))
-            .background(DarkScheme.surface).padding(14.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp),
-    ) {
-        Text(title, fontSize = 14.sp, color = Subtitle)
-        Text(
-            (if (now.phase == SleepEngine.Phase.WINDOW) "В " else "До ") + SleepEngine.fmtClock(time),
-            fontSize = 28.sp, fontWeight = FontWeight.Bold, color = DarkScheme.onSurface,
-        )
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text(if (now.phase == SleepEngine.Phase.WINDOW) SleepEngine.fmtIn(now.minutesLeft)
-                else "Осталось ${SleepEngine.fmtDurHuman(now.minutesLeft)}", fontSize = 14.sp,
-                color = ActiveBorder, modifier = Modifier.weight(1f))
-            FactPill("Изменить", onEdit, a11y = "Изменить текущее событие расписания")
-        }
-    }
-}
-
-// Лента строится из единого списка событий, а не из блоков сна с кормлениями в конце.
-@Composable
-private fun Timeline(
-    schedule: SleepEngine.Schedule,
-    age: SleepEngine.Age,
-    now: SleepEngine.NowInfo,
-    placements: List<SleepEngine.FeedPlacement>,
-    eventKey: String?,
-    onEventKey: (String) -> Unit,
-    pastOpen: Boolean,
-    onPastOpen: () -> Unit,
-    onChangeNap: (Int, Int) -> Unit,
-    onResetNap: (Int) -> Unit,
-    onChangeWw: (Int, Int) -> Unit,
-    onResetWw: (Int) -> Unit,
-) {
-    val events = SleepEngine.timeline(schedule, placements.map { it.feed })
-    val nowAbs = now.nextAbs - now.minutesLeft
-    fun isPast(event: SleepEngine.DayEvent): Boolean {
-        // Начало текущего сна остаётся рядом с его окончанием и редактором.
-        if (event.kind == SleepEngine.EventKind.NAP_START &&
-            now.phase == SleepEngine.Phase.NAP && event.index == now.napIndex) return false
-        if (event.kind == SleepEngine.EventKind.WAKE && now.phase == SleepEngine.Phase.WINDOW && now.windowIndex == 0) return false
-        if (event.kind == SleepEngine.EventKind.NAP_END && now.phase == SleepEngine.Phase.WINDOW && event.index == now.windowIndex) return false
-        if (event.kind == SleepEngine.EventKind.BEDTIME && now.phase == SleepEngine.Phase.NIGHT) return false
-        return event.time < nowAbs
-    }
-    val past = events.filter { isPast(it) }
-    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-        if (past.isNotEmpty()) {
-            Text(
-                (if (pastOpen) "▾ " else "▸ ") + "Ранее по плану · ${past.size}",
-                fontSize = 13.sp, color = Subtitle,
-                modifier = Modifier.fillMaxWidth().clickable(onClick = onPastOpen)
-                    .heightIn(min = 48.dp).padding(vertical = 12.dp),
-            )
-        }
-        val visible = if (pastOpen) events else events.filter {
-            !isPast(it) || (it.kind == SleepEngine.EventKind.WAKE && eventKey == "ww0") ||
-                (it.kind == SleepEngine.EventKind.NAP_END && eventKey == "ww${it.index}") ||
-                (it.kind == SleepEngine.EventKind.NAP_START && eventKey == "nap${it.index}")
-        }
-        visible.forEach { event ->
-            val nap = schedule.naps.firstOrNull { it.index == event.index }
-            val windowIndex = when (event.kind) {
-                SleepEngine.EventKind.WAKE -> 0
-                SleepEngine.EventKind.NAP_END -> event.index
-                else -> null
-            }
-            val key = when (event.kind) {
-                SleepEngine.EventKind.NAP_START -> "nap${event.index}"
-                SleepEngine.EventKind.WAKE, SleepEngine.EventKind.NAP_END -> "ww$windowIndex"
-                else -> null
-            }
-            val active = when (event.kind) {
-                SleepEngine.EventKind.NAP_START -> now.phase == SleepEngine.Phase.NAP && now.napIndex == event.index
-                SleepEngine.EventKind.WAKE, SleepEngine.EventKind.NAP_END -> now.phase == SleepEngine.Phase.WINDOW && now.windowIndex == windowIndex
-                SleepEngine.EventKind.BEDTIME -> now.phase == SleepEngine.Phase.NIGHT
-                else -> false
-            }
-            val title = when (event.kind) {
-                SleepEngine.EventKind.WAKE -> "Подъём"
-                SleepEngine.EventKind.NAP_START -> "Сон ${event.index}"
-                SleepEngine.EventKind.NAP_END -> "Пробуждение"
-                SleepEngine.EventKind.FEED -> "Кормление"
-                SleepEngine.EventKind.BEDTIME -> "Ночной сон"
-            }
-            val detail = when (event.kind) {
-                SleepEngine.EventKind.NAP_START -> SleepEngine.fmtDurHuman(nap!!.duration)
-                SleepEngine.EventKind.WAKE, SleepEngine.EventKind.NAP_END -> {
-                    val window = schedule.windows[windowIndex!!]
-                    "Бодрствование " + SleepEngine.fmtDurHuman(window.effective)
-                }
-                SleepEngine.EventKind.BEDTIME -> "До ${SleepEngine.fmtClock(schedule.wake)} · ${SleepEngine.fmtDurHuman(schedule.nightSleep)}"
-                SleepEngine.EventKind.FEED -> {
-                    val overlap = schedule.naps.firstOrNull { feedTimeInNap(event.time, it) }
-                    if (overlap != null) "Во время сна ${overlap.index} · до конца ${SleepEngine.fmtDurHuman(overlap.end - event.time)}" else null
-                }
-            }
-            val tint = when (event.kind) {
-                SleepEngine.EventKind.FEED -> FeedTint
-                SleepEngine.EventKind.NAP_START, SleepEngine.EventKind.BEDTIME -> NightTint
-                else -> Subtitle
-            }
-            Row(
-                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp))
-                    .background(if (active) ActiveBg else Color.Transparent)
-                    .then(if (key != null) Modifier.clickable { onEventKey(key) } else Modifier)
-                    .heightIn(min = 52.dp).padding(horizontal = 8.dp, vertical = 9.dp),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                Text(SleepEngine.fmtClock(event.time), fontSize = 15.sp,
-                    fontWeight = FontWeight.SemiBold, color = tint,
-                    modifier = Modifier.width((62 * LocalDensity.current.fontScale).dp), softWrap = false)
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                    Text(title, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = tint)
-                    if (detail != null) Text(detail, fontSize = 12.sp, color = Subtitle)
-                }
-                if (key != null) Icon(resPainter(R.drawable.ic_edit), contentDescription = null, tint = Subtitle, modifier = Modifier.size(16.dp))
-            }
-            if (key != null && eventKey == key) {
-                if (event.kind == SleepEngine.EventKind.NAP_START) {
-                    NapEditor(nap!!, { onChangeNap(nap.index - 1, it) }, { onResetNap(nap.index - 1) })
-                } else if (windowIndex != null) {
-                    WindowEditor(age, schedule.windows[windowIndex],
-                        { onChangeWw(windowIndex, it) }, { onResetWw(windowIndex) })
-                }
-            }
-        }
-    }
-}
-
-private fun feedTimeInNap(time: Int, nap: SleepEngine.ScheduledNap): Boolean =
-    time >= nap.start && time < nap.end
-
-// ══════════════════════════ РЕДАКТОРЫ ═════════════════════════════════════
-
-@Composable
-private fun NapEditor(nap: SleepEngine.ScheduledNap, onChange: (Int) -> Unit, onReset: () -> Unit) {
-    val canLess = nap.duration > 20
-    val canMore = nap.duration < 240
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 8.dp)
-            .clip(RoundedCornerShape(12.dp))
-            .background(MutedBg)
-            .padding(12.dp),
-    ) {
-        Text("Длительность сна ${nap.index}", fontSize = 13.sp, color = DarkScheme.onSurfaceVariant)
-        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 2.dp)) {
-            RollingText(
-                text = SleepEngine.fmtDurHuman(nap.duration),
-                fontSize = 20.sp,
-                fontWeight = FontWeight.Bold,
-                color = DarkScheme.onSurface,
-            )
-            Spacer(Modifier.weight(1f))
-            Text(
-                if (nap.offset != 0) {
-                    "${if (nap.offset < 0) "−" else "+"}${abs(nap.offset)} мин от плана"
-                } else "по плану",
-                fontSize = 13.sp,
-                color = if (nap.offset != 0) Amber else DarkScheme.onSurfaceVariant,
-            )
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(top = 6.dp)) {
-            FactPill(
-                "−5 мин", { onChange(-5) }, enabled = canLess,
-                a11y = "Уменьшить длительность сна ${nap.index} на 5 минут",
-            )
-            FactPill(
-                "+5 мин", { onChange(5) }, enabled = canMore,
-                a11y = "Увеличить длительность сна ${nap.index} на 5 минут",
-            )
-            if (nap.offset != 0) {
-                FactPill("Вернуть план", onReset, a11y = "Вернуть плановую длительность сна ${nap.index}")
-            }
-        }
-        Text(
-            "Последующие события пересчитаны",
-            fontSize = 11.sp,
-            color = DarkScheme.onSurfaceVariant,
-            modifier = Modifier.padding(top = 6.dp),
-        )
-        SleepEngine.napWarning(nap)?.let {
-            Text("⚠ $it", fontSize = 12.sp, color = Amber, modifier = Modifier.padding(top = 4.dp))
-        }
-    }
-}
-
-@Composable
-private fun WindowEditor(
-    age: SleepEngine.Age,
-    window: SleepEngine.Window,
-    onChange: (Int) -> Unit,
-    onReset: () -> Unit,
-) {
-    val regime = window.regime
-    val canLess = window.effective > age.hardMin
-    val canMore = window.effective < age.hardMax
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 8.dp)
-            .clip(RoundedCornerShape(12.dp))
-            .background(MutedBg)
-            .padding(12.dp),
-    ) {
-        Text("Бодрствование ${window.index + 1}", fontSize = 13.sp, color = DarkScheme.onSurfaceVariant)
-        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 2.dp)) {
-            RollingText(
-                text = SleepEngine.fmtDurHuman(window.effective),
-                fontSize = 20.sp,
-                fontWeight = FontWeight.Bold,
-                color = DarkScheme.onSurface,
-            )
-            Spacer(Modifier.weight(1f))
-            Text(
-                if (window.hasManual) {
-                    "${if (window.manual < 0) "−" else "+"}${abs(window.manual)} мин от плана"
-                } else "по плану",
-                fontSize = 13.sp,
-                color = if (window.hasManual) Amber else DarkScheme.onSurfaceVariant,
-            )
-        }
-        if (window.hasAuto) {
-            Text(
-                "авто ${if (window.comp < 0) "−" else "+"}${abs(window.comp)} мин после " +
-                    "${if (window.comp < 0) "короткого" else "длинного"} сна",
-                fontSize = 12.sp, color = Subtitle, modifier = Modifier.padding(top = 2.dp),
-            )
-        }
-        if (regime != 0) {
-            Text(
-                "режим регресса −${abs(regime)} мин",
-                fontSize = 12.sp, color = Amber, modifier = Modifier.padding(top = 2.dp),
-            )
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(top = 6.dp)) {
-            FactPill(
-                "−5 мин", { onChange(-5) }, enabled = canLess,
-                a11y = "Уменьшить бодрствование ${window.index + 1} на 5 минут",
-            )
-            FactPill(
-                "+5 мин", { onChange(5) }, enabled = canMore,
-                a11y = "Увеличить бодрствование ${window.index + 1} на 5 минут",
-            )
-            if (window.hasManual) {
-                FactPill("Вернуть план", onReset, a11y = "Вернуть плановое бодрствование ${window.index + 1}")
-            }
-        }
-        Text(
-            "Последующие события пересчитаны",
-            fontSize = 11.sp,
-            color = DarkScheme.onSurfaceVariant,
-            modifier = Modifier.padding(top = 6.dp),
-        )
-        SleepEngine.wwWarning(age, window)?.let {
-            Text("⚠ $it", fontSize = 12.sp, color = Amber, modifier = Modifier.padding(top = 4.dp))
-        }
-    }
-}
-
-// ══════════════════════════ ИТОГИ ═════════════════════════════════════════
-
-@Composable
-private fun TotalsBlock(
-    schedule: SleepEngine.Schedule,
-    age: SleepEngine.Age,
-    open: Boolean,
-    onToggle: () -> Unit,
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
-            .background(DarkScheme.surface)
-            .padding(12.dp),
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier
-                .fillMaxWidth()
-                .clickable(onClick = onToggle)
-                .padding(vertical = 2.dp),
-        ) {
-            Text("По плану", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = Subtitle)
-            Spacer(Modifier.weight(1f))
-            Text(
-                "${if (open) "▾" else "▸"}",
-                fontSize = 13.sp, color = Subtitle,
-            )
-        }
-        Text(
-            "сон днём ${SleepEngine.fmtDurHuman(schedule.daySleep)} · " +
-                "ночью ${SleepEngine.fmtDurHuman(schedule.nightSleep)} · " +
-                "всего ${SleepEngine.fmtDurHuman(schedule.totalSleep)}",
-            fontSize = 14.sp,
-            color = DarkScheme.onSurface,
-            modifier = Modifier.padding(top = 2.dp),
-        )
-        if (open) {
-            Spacer(Modifier.height(6.dp))
-            SummaryRow("Сон днём", SleepEngine.fmtDurHuman(schedule.daySleep), age.dayNormShort)
-            SummaryRow(
-                "Сон ночью",
-                SleepEngine.fmtDurHuman(schedule.nightSleep),
-                age.nightNormShort,
-                warn = schedule.nightSleep !in age.nightMin..age.nightMax,
-            )
-            SummaryRow("Всего сна", SleepEngine.fmtDurHuman(schedule.totalSleep), age.totalNormShort, highlight = true)
-            SummaryRow("Бодрствование", SleepEngine.fmtDurHuman(schedule.wakeTotal), null)
-            schedule.bedtimeHint?.let {
-                Text("⚠ $it", fontSize = 12.sp, color = Amber, modifier = Modifier.padding(top = 4.dp))
-            }
-            Text(
-                "Это план по нормам сна, а не журнал фактического сна.",
-                fontSize = 11.sp,
-                color = DarkScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 6.dp),
-            )
-        }
-    }
-}
-
-@Composable
-private fun SummaryRow(
-    label: String,
-    value: String,
-    norm: String?,
-    highlight: Boolean = false,
-    warn: Boolean = false,
-) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 3.dp),
-    ) {
-        Text(label, fontSize = 14.sp, color = DarkScheme.onSurface)
-        Spacer(Modifier.weight(1f))
-        Text(
-            value,
-            fontSize = 15.sp,
-            fontWeight = FontWeight.Bold,
-            color = when {
-                warn -> Amber
-                highlight -> DarkScheme.primary
-                else -> DarkScheme.onSurface
-            },
-        )
-        if (norm != null) {
-            Text(
-                "  ·  $norm",
-                fontSize = 12.sp,
-                color = DarkScheme.onSurfaceVariant,
-            )
-        }
-    }
-}
-
-// ══════════════════════════ НАСТРОЙКИ ═════════════════════════════════════
-
-@Composable
-private fun SettingsScreen(
-    age: SleepEngine.Age,
-    plan: SleepEngine.NapPlan,
-    feeds: List<Int>,
-    regress: Boolean,
-    version: String,
-    editingFeed: Int,
-    onEditingFeed: (Int) -> Unit,
-    onSelectAge: (SleepEngine.Age) -> Unit,
-    onSelectPlan: (SleepEngine.NapPlan) -> Unit,
-    onToggleRegress: () -> Unit,
-    onChangeFeed: (Int, Int) -> Unit,
-    onResetFeeds: () -> Unit,
-    onResetPlan: () -> Unit,
-    onBack: () -> Unit,
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .windowInsetsPadding(WindowInsets.safeDrawing)
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 18.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        Spacer(Modifier.height(8.dp))
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            IconPressable(icon = R.drawable.ic_back, label = "Назад", a11y = "Вернуться к расписанию", onClick = onBack)
-            Text("Настройки", fontSize = 24.sp, fontWeight = FontWeight.Bold)
-        }
-
-        SettingsSection("Схема дня") {
-            Text("Возраст", fontSize = 13.sp, color = DarkScheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 6.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                for (option in SleepEngine.AGES) {
-                    Chip(option.label, option === age, "Возраст ${option.label}") { onSelectAge(option) }
-                }
-            }
-            Spacer(Modifier.height(10.dp))
-            Text("Дневных снов", fontSize = 13.sp, color = DarkScheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 6.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                for (option in age.plans) {
-                    Chip(option.name, option === plan, option.name) { onSelectPlan(option) }
-                }
-            }
-            Text(
-                "Смена возраста или схемы сбрасывает правки текущего дня (подъём и кормления сохраняются).",
-                fontSize = 11.sp,
-                color = DarkScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 6.dp),
-            )
-        }
-
-        SettingsSection("Кормления") {
-            for (f in feeds) {
-                val editing = editingFeed == f
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(10.dp))
-                        .clickable(enabled = true, onClickLabel = "Изменить кормление") {
-                            onEditingFeed(if (editing) -1 else f)
-                        }
-                        .padding(vertical = 8.dp, horizontal = 4.dp),
-                ) {
-                    Icon(resPainter(R.drawable.ic_bottle), contentDescription = null, tint = FeedTint, modifier = Modifier.size(16.dp))
-                    Text(
-                        SleepEngine.fmtClock(f),
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.padding(start = 8.dp),
-                    )
-                    Spacer(Modifier.weight(1f))
-                    Text(if (editing) "Свернуть" else "Изменить", fontSize = 13.sp, color = ActiveBorder)
-                }
-                if (editing) {
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(MutedBg)
-                            .padding(10.dp),
-                    ) {
-                        FactPill("−1 ч", { onChangeFeed(f, -60) }, a11y = "Сдвинуть кормление на час раньше")
-                        FactPill("−5 мин", { onChangeFeed(f, -5) }, a11y = "Сдвинуть кормление на 5 минут раньше")
-                        FactPill("+5 мин", { onChangeFeed(f, 5) }, a11y = "Сдвинуть кормление на 5 минут позже")
-                        FactPill("+1 ч", { onChangeFeed(f, 60) }, a11y = "Сдвинуть кормление на час позже")
-                    }
-                }
-            }
-            FactPill("Сбросить кормления", onResetFeeds, modifier = Modifier.padding(top = 4.dp), a11y = "Вернуть кормления по умолчанию")
-        }
-
-        SettingsSection("Режим сокращения окон") {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("Регресс сна", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                    Text(
-                        "Все окна бодрствования −10 мин, отбой раньше. Обычно нужен 3–7 дней.",
-                        fontSize = 12.sp,
-                        color = DarkScheme.onSurfaceVariant,
-                    )
-                }
-                Chip(if (regress) "вкл" else "выкл", regress, if (regress) "Режим включён" else "Режим выключен", onToggleRegress)
-            }
-        }
-
-        SettingsSection("День") {
-            Text(
-                "Сохранённые правки снов и окон действуют, пока их не сбросишь. «Вернуть базовый план» сбрасывает правки, но сохраняет схему, подъём, кормления и режим.",
-                fontSize = 12.sp,
-                color = DarkScheme.onSurfaceVariant,
-            )
-            FactPill("Вернуть базовый план", onResetPlan, modifier = Modifier.padding(top = 6.dp), a11y = "Сбросить правки снов и окон")
-        }
-
-        SettingsSection("О приложении") {
-            Text(
-                "Приложение считает план по нормам сна для возраста: окна бодрствования, " +
-                    "дневные сны, ночь и кормления. Все времена — прогноз, а не журнал " +
-                    "фактического сна. Все правки кратны 5 минутам, день всегда сходится " +
-                    "к 24 часам.",
-                fontSize = 12.sp,
-                color = DarkScheme.onSurfaceVariant,
-            )
-            Text("BaSleep v$version", fontSize = 12.sp, color = Subtitle, modifier = Modifier.padding(top = 6.dp))
-        }
-        Spacer(Modifier.height(12.dp))
-    }
-}
-
-@Composable
-private fun SettingsSection(title: String, content: @Composable () -> Unit) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
-            .background(DarkScheme.surface)
-            .padding(14.dp),
-    ) {
-        Text(title, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = Subtitle)
-        Spacer(Modifier.height(8.dp))
-        content()
-    }
-}
-
-@Composable
-private fun Chip(text: String, selected: Boolean, a11y: String, onClick: () -> Unit) {
-    Pressable(
-        shape = RoundedCornerShape(50),
-        container = if (selected) DarkScheme.primary else DarkScheme.surfaceVariant,
-        onClick = onClick,
-        a11y = "$a11y${if (selected) ", выбрано" else ""}",
-    ) {
-        Text(
-            (if (selected) "✓ " else "") + text,
-            color = if (selected) DarkScheme.onPrimary else ChipIdleFg,
-            fontSize = 15.sp,
-            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
-        )
-    }
-}
-
-// ══════════════════════════ НОЧНОЙ ЭКРАН ══════════════════════════════════
-
-@Composable
-private fun NightScreen(s: SleepEngine.Schedule, nowMin: Int, onExit: () -> Unit) {
-    val context = LocalContext.current
-    DisposableEffect(Unit) {
+    val night = state.phase == LiveTracker.Phase.NIGHT || state.phase == LiveTracker.Phase.NIGHT_AWAKE
+    val accent by animateColorAsState(if (state.phase == LiveTracker.Phase.NAP || night) NightTint else DarkScheme.primary, label = "stateColor")
+    val localHour = java.time.Instant.ofEpochMilli(now).atZone(java.time.ZoneId.systemDefault()).hour
+    val nightAvailable = localHour >= 21 || localHour < 6
+    DisposableEffect(dim) {
         val window = (context as? Activity)?.window
-        val prev = window?.attributes?.screenBrightness ?: -1f
-        window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        window?.attributes = window?.attributes?.apply { screenBrightness = 0.10f }
-        onDispose {
-            window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-            window?.attributes = window?.attributes?.apply { screenBrightness = prev }
-        }
+        val before = window?.attributes?.screenBrightness ?: -1f
+        if (dim) window?.attributes = window?.attributes?.apply { screenBrightness = .08f }
+        onDispose { if (dim) window?.attributes = window?.attributes?.apply { screenBrightness = before } }
     }
-    val info = remember(s, nowMin) { SleepEngine.nowInfo(s, nowMin) }
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color.Black)
-            .clickable(onClickLabel = "Выйти из ночного экрана") { onExit() },
-        contentAlignment = Alignment.Center,
-    ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(
-                "${info.title} · до ${info.nextGenitive}",
-                fontSize = 16.sp,
-                color = Color(0xFF8A93A8),
-            )
-            RollingText(
-                text = SleepEngine.fmtDurHuman(info.minutesLeft),
-                fontSize = 80.sp,
-                fontWeight = FontWeight.Bold,
-                color = Color(0xFFE8EBF4),
-                modifier = Modifier.padding(vertical = 12.dp),
-            )
-            Text(
-                "сейчас ${SleepEngine.fmtClock(nowMin)} · подъём ${SleepEngine.fmtClock(s.wake)}",
-                fontSize = 14.sp,
-                color = Color(0xFF8A93A8),
-            )
-            Text(
-                "коснись экрана, чтобы выйти",
-                fontSize = 12.sp,
-                color = Color(0xFF4A5164),
-                modifier = Modifier.padding(top = 24.dp),
-            )
+    MaterialTheme(colorScheme = DarkScheme, typography = Typography(
+        bodyLarge = TextStyle(fontFamily = Manrope), bodyMedium = TextStyle(fontFamily = Manrope),
+        labelLarge = TextStyle(fontFamily = Manrope), titleLarge = TextStyle(fontFamily = Manrope))) {
+        Surface(Modifier.fillMaxSize(), color = if (dim) Color.Black else DarkScheme.background) {
+            Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)
+                .verticalScroll(rememberScrollState()).padding(horizontal = 24.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(if (settings) "Настройки" else "Дима", fontSize = 24.sp, fontWeight = FontWeight.SemiBold)
+                        Text(if (settings) "BaSleep $version" else "${age.label} · ${plan.name}", fontSize = 13.sp, color = Subtitle)
+                    }
+                    IconPressable(if (settings) R.drawable.ic_back else R.drawable.ic_sliders,
+                        "Настройки", if (settings) "Вернуться к трекеру" else "Открыть настройки") { settings = !settings; editor = false }
+                }
+                if (error != null) Text(error!!, color = Amber, fontSize = 14.sp)
+                if (settings) {
+                    Text("Схема для прогноза", fontSize = 16.sp)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        SleepEngine.AGES.forEachIndexed { i, a ->
+                            FactPill((if (i == ageIndex) "✓ " else "") + a.label, { config(newAge = i, newPlan = 0) })
+                        }
+                    }
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        age.plans.forEachIndexed { i, p -> FactPill((if (p == plan) "✓ " else "") + p.name, { config(newPlan = i) }) }
+                    }
+                    FactPill(if (regress) "Сокращение окон: включено" else "Сокращение окон: выключено", { config(newRegress = !regress) })
+                    Text("Схема меняет только прогноз. Записанное время остаётся.", color = Subtitle, fontSize = 13.sp)
+                    Text("Кормления · ориентиры", fontSize = 16.sp)
+                    feeds.forEachIndexed { i, f ->
+                        var open by remember(f, i) { mutableStateOf(false) }
+                        TextButton(onClick = { open = !open }) { Text("${SleepEngine.fmtClock(f)} · Изменить") }
+                        if (open) ClockEditor(f / 60, f % 60, onCancel = { open = false }) { h, m ->
+                            config(newFeeds = feeds.toMutableList().also { it[i] = h * 60 + m }.sorted()); open = false; null
+                        }
+                    }
+                    if (state.phase == LiveTracker.Phase.AWAKE || state.phase == LiveTracker.Phase.NAP) {
+                        FactPill("Начать ночной сон", { settings = false; act(LiveTracker::startNight) })
+                    }
+                    TextButton(onClick = { dim = !dim; settings = false }) { Text(if (dim) "Обычная яркость" else "Тусклый экран") }
+                    TextButton(onClick = {
+                        val text = buildString {
+                            append("Дима · ").append(phaseTitle(state.phase))
+                            if (state.phase != LiveTracker.Phase.READY) append(" с ").append(clock(state.since))
+                            forecasts.forEach { append("\n").append(clock(it.at)).append(" · ").append(it.title).append(" (прогноз)") }
+                        }
+                        context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, text), "Поделиться планом"))
+                    }) { Text("Поделиться планом") }
+                } else {
+                    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Box(Modifier.size(52.dp).clip(RoundedCornerShape(18.dp)).background(DarkScheme.surfaceVariant), contentAlignment = Alignment.Center) {
+                            Icon(resPainter(if (state.phase == LiveTracker.Phase.NAP || state.phase == LiveTracker.Phase.NIGHT) R.drawable.ic_moon else R.drawable.ic_sun),
+                                contentDescription = null, tint = accent, modifier = Modifier.size(26.dp))
+                        }
+                        AnimatedContent(state.phase, label = "phase") { phase -> Text(phaseTitle(phase), fontSize = 24.sp, fontWeight = FontWeight.Medium, textAlign = TextAlign.Center) }
+                        if (state.phase != LiveTracker.Phase.READY) {
+                            val duration = ((now - state.since).coerceAtLeast(0) / LiveTracker.MINUTE).toInt()
+                            RollingText(SleepEngine.fmtDurHuman(duration), 44.sp, FontWeight.Medium, DarkScheme.onSurface)
+                            Text("С ${clock(state.since)}" + daySuffix(state.since, now), color = Subtitle, fontSize = 14.sp)
+                        } else Text("Нажми, когда начнётся ваш день", fontSize = 14.sp, color = Subtitle)
+                    }
+                    val action = when (state.phase) {
+                        LiveTracker.Phase.READY, LiveTracker.Phase.NAP, LiveTracker.Phase.NIGHT -> "Проснулся"
+                        else -> "Уснул"
+                    }
+                    Pressable(RoundedCornerShape(24.dp), accent, Modifier.fillMaxWidth().heightIn(min = 72.dp),
+                        a11y = "$action — записать время телефона", onClick = { act(LiveTracker::toggle) }) {
+                        Text(action, fontSize = 24.sp, color = DarkScheme.onPrimary, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(18.dp))
+                    }
+                    if (state.phase != LiveTracker.Phase.READY) {
+                        FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                            TextButton(onClick = { editor = !editor }) { Text("Исправить время") }
+                            if (!night && nightAvailable) {
+                                TextButton(onClick = { act(LiveTracker::startNight) }) { Text("Ночной сон", color = NightTint) }
+                            }
+                        }
+                    }
+                    if (editor) ClockEditor(
+                        java.time.Instant.ofEpochMilli(state.since).atZone(java.time.ZoneId.systemDefault()).hour,
+                        java.time.Instant.ofEpochMilli(state.since).atZone(java.time.ZoneId.systemDefault()).minute,
+                        onCancel = { editor = false }) { h, m ->
+                        try {
+                            val current = System.currentTimeMillis()
+                            val at = LiveTracker.clockTime(h, m, current, java.time.ZoneId.systemDefault())
+                            val next = LiveTracker.correct(state, at, current)
+                            store(Prefs.Session(next, state), "Время исправлено: ${clock(at)}"); null
+                        } catch (e: IllegalArgumentException) { e.message ?: "Проверь время" }
+                    }
+                    if (night && state.phase == LiveTracker.Phase.NIGHT_AWAKE) {
+                        FactPill("Начать день", { act(LiveTracker::startDay) }, Modifier.fillMaxWidth())
+                    }
+                    if (session.undo != null) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(message ?: "Последнее действие", fontSize = 13.sp, color = Subtitle, modifier = Modifier.weight(1f))
+                            TextButton(onClick = { session.undo?.let { store(Prefs.Session(it), "Действие отменено") } }) { Text("Отменить") }
+                        }
+                    }
+                    val next = forecasts.firstOrNull()
+                    if (next != null) {
+                        Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(DarkScheme.surface).padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f)) {
+                                    Text("Ориентир", fontSize = 12.sp, color = Subtitle)
+                                    Text(next.title, fontSize = 16.sp)
+                                }
+                                Text(clock(next.at), fontSize = 22.sp, color = accent)
+                            }
+                            if (next.at < now) Text("Ориентир прошёл. Запиши событие, когда оно случится.", fontSize = 12.sp, color = Subtitle)
+                            val feed = LiveTracker.nextFeed(feeds, now, java.time.ZoneId.systemDefault())
+                            if (feed != null) Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text("Кормление · ориентир", fontSize = 13.sp, color = FeedTint, modifier = Modifier.weight(1f))
+                                Text(clock(feed), fontSize = 14.sp, color = FeedTint, softWrap = false)
+                            }
+                        }
+                    } else if (state.phase != LiveTracker.Phase.READY) {
+                        LiveTracker.nextFeed(feeds, now, java.time.ZoneId.systemDefault())?.let {
+                            Text("Кормление · ${clock(it)} · ориентир", color = FeedTint, fontSize = 14.sp)
+                        }
+                    }
+                    if (forecasts.size > 1) {
+                        TextButton(onClick = { planOpen = !planOpen }) { Text(if (planOpen) "Скрыть план" else "План дальше") }
+                        if (planOpen) forecasts.forEach { f ->
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                                Text(clock(f.at), color = accent, fontSize = 15.sp)
+                                Text(f.title, fontSize = 15.sp, modifier = Modifier.weight(1f))
+                            }
+                        }
+                    }
+                    if (dim) TextButton(onClick = { dim = false }) { Text("Обычная яркость") }
+                }
+            }
         }
     }
 }
 
-// ══════════════════════════ ОБЩИЕ КОМПОНЕНТЫ ══════════════════════════════
+private fun phaseTitle(phase: LiveTracker.Phase): String = when (phase) {
+    LiveTracker.Phase.READY -> "Начнём день"
+    LiveTracker.Phase.AWAKE -> "Бодрствует"
+    LiveTracker.Phase.NAP -> "Спит"
+    LiveTracker.Phase.NIGHT -> "Ночной сон"
+    LiveTracker.Phase.NIGHT_AWAKE -> "Проснулся ночью"
+}
+private fun daySuffix(at: Long, now: Long): String {
+    val zone = java.time.ZoneId.systemDefault()
+    val days = java.time.temporal.ChronoUnit.DAYS.between(
+        java.time.Instant.ofEpochMilli(at).atZone(zone).toLocalDate(),
+        java.time.Instant.ofEpochMilli(now).atZone(zone).toLocalDate())
+    return when { days == 1L -> " · вчера"; days > 1 -> " · ранее"; else -> "" }
+}
+
+@Composable
+private fun ClockEditor(initialHour: Int, initialMinute: Int, onCancel: () -> Unit, onSave: (Int, Int) -> String?) {
+    var h by rememberSaveable(initialHour, initialMinute) { mutableStateOf("%02d".format(initialHour)) }
+    var m by rememberSaveable(initialHour, initialMinute) { mutableStateOf("%02d".format(initialMinute)) }
+    var error by remember { mutableStateOf<String?>(null) }
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(DarkScheme.surface).padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            OutlinedTextField(h, { h = it.filter(Char::isDigit).take(2) }, label = { Text("Часы") },
+                modifier = Modifier.weight(1f), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), singleLine = true)
+            OutlinedTextField(m, { m = it.filter(Char::isDigit).take(2) }, label = { Text("Минуты") },
+                modifier = Modifier.weight(1f), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), singleLine = true)
+        }
+        if (error != null) Text(error!!, color = Amber, fontSize = 13.sp)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FactPill("Сохранить", {
+                val hour = h.toIntOrNull(); val min = m.toIntOrNull()
+                error = if (hour == null || min == null || hour !in 0..23 || min !in 0..59) "Укажи часы 00–23 и минуты 00–59" else onSave(hour, min)
+            })
+            TextButton(onClick = onCancel) { Text("Закрыть") }
+        }
+        Text("Время позже текущего считаем вчерашним.", fontSize = 12.sp, color = Subtitle)
+    }
+}
 
 /** Текст, значение которого «прокатывается» при изменении. */
 @Composable
