@@ -1,7 +1,15 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+}
+
+/** Релизный ключ лежит вне репозитория (F:\android); пароли — в keystore.properties. */
+val keystoreProps = Properties().apply {
+    val f = file("F:/android/keystore.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
 }
 
 android {
@@ -14,6 +22,22 @@ android {
         targetSdk = 35
         versionCode = 15
         versionName = "1.14"
+    }
+
+    signingConfigs {
+        create("release") {
+            storeFile = file("F:/android/basleep.keystore")
+            storePassword = keystoreProps.getProperty("storePassword")
+            keyAlias = "basleep"
+            keyPassword = keystoreProps.getProperty("keyPassword")
+        }
+    }
+
+    buildTypes {
+        release {
+            isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("release")
+        }
     }
 
     compileOptions {

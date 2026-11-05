@@ -49,7 +49,14 @@ Set-Location 'F:\BaSleep'
 & 'F:\android\gradle-8.11.1\bin\gradle.bat' :app:testDebugUnitTest :app:assembleDebug
 ```
 
-APK: `app/build/outputs/apk/debug/app-debug.apk`.
+Релизная сборка (подпись постоянным ключом `F:\android\basleep.keystore`,
+пароли в `F:\android\keystore.properties`, оба файла вне репозитория — не терять!):
+
+```powershell
+& 'F:\android\gradle-8.11.1\bin\gradle.bat' :app:assembleRelease
+```
+
+APK: `app/build/outputs/apk/release/app-release.apk`.
 
 42 теста: 27 регрессионных тестов старого калькулятора и 15 тестов LiveTracker.
 UI проверяется отдельно на эмуляторе; сборка не заменяет проверку сценариев.
