@@ -34,8 +34,11 @@ class WidgetNext : AppWidgetProvider() {
         }
         val formatter = java.time.format.DateTimeFormatter.ofPattern("HH:mm")
         fun clock(at: Long) = java.time.Instant.ofEpochMilli(at).atZone(java.time.ZoneId.systemDefault()).format(formatter)
-        val sub = if (next != null) "${next.title} · ${clock(next.at)} · ориентир"
-            else if (state.phase != LiveTracker.Phase.READY) "С ${clock(state.since)}" else "Время запишется с телефона"
+        val sub = if (next != null) {
+            val left = ((next.at - System.currentTimeMillis()) / LiveTracker.MINUTE).toInt()
+            "${next.title} · ${clock(next.at)} · " +
+                if (left >= 0) "осталось ~${SleepEngine.fmtDurHuman(left)}" else "ориентир прошёл"
+        } else if (state.phase != LiveTracker.Phase.READY) "С ${clock(state.since)}" else "Время запишется с телефона"
 
         val views = RemoteViews(context.packageName, R.layout.widget_next).apply {
             setTextViewText(R.id.widget_title, "Режим сна")

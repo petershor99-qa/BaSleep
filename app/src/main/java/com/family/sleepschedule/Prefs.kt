@@ -51,6 +51,8 @@ object Prefs {
         val undo: LiveTracker.State? = null,
         /** true — сохранённая сессия была повреждена и не прочиталась. */
         val corrupt: Boolean = false,
+        /** Сколько интервалов истории добавило последнее действие (для отмены). */
+        val logged: Int = 0,
     )
     private fun encode(s: LiveTracker.State) = org.json.JSONObject().apply {
         put("phase", s.phase.name); put("since", s.since); put("previousAt", s.previousAt)
@@ -69,14 +71,23 @@ object Prefs {
         val raw = prefs.getString("live_session", null) ?: return Session(LiveTracker.State())
         return try {
             val j = org.json.JSONObject(raw)
-            Session(decode(j.getJSONObject("state")), if (j.isNull("undo")) null else decode(j.getJSONObject("undo")))
+            Session(decode(j.getJSONObject("state")), if (j.isNull("undo")) null else decode(j.getJSONObject("undo")),
+                logged = j.optInt("logged", 0))
         } catch (_: Exception) {
             Session(LiveTracker.State(), corrupt = true)
         }
     }
 
-    /** Одна атомарная запись: состояние и однократная отмена, без истории. */
+    /** Одна атомарная запись: состояние, однократная отмена и счётчик записей истории. */
     fun saveLive(prefs: SharedPreferences, session: Session): Boolean = prefs.edit().putString("live_session",
         org.json.JSONObject().put("state", encode(session.state))
-            .put("undo", session.undo?.let { encode(it) } ?: org.json.JSONObject.NULL).toString()).commit()
+            .put("undo", session.undo?.let { encode(it) } ?: org.json.JSONObject.NULL)
+            .put("logged", session.logged).toString()).commit()
+
+    /** Журнал завершённых интервалов — простой текст, одна строка на интервал. */
+    fun loadHistory(prefs: SharedPreferences): List<History.Interval> =
+        History.parse(prefs.getString("history", null))
+
+    fun saveHistory(prefs: SharedPreferences, list: List<History.Interval>): Boolean =
+        prefs.edit().putString("history", History.serialize(list)).commit()
 }

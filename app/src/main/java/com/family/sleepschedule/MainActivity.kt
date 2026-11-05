@@ -151,12 +151,15 @@ private fun clock(time: Long): String = java.time.Instant.ofEpochMilli(time)
 @Composable
 fun App(prefs: SharedPreferences, version: String) {
     var session by remember { mutableStateOf(Prefs.loadLive(prefs)) }
+    var history by remember { mutableStateOf(Prefs.loadHistory(prefs)) }
     var ageIndex by remember { mutableIntStateOf(prefs.getInt("age", 0).coerceIn(SleepEngine.AGES.indices)) }
     var planIndex by remember { mutableIntStateOf(prefs.getInt("plan", 0)) }
     var regress by remember { mutableStateOf(Prefs.loadRegress(prefs)) }
     var feeds by remember { mutableStateOf(Prefs.loadFeeds(prefs)) }
     var settings by rememberSaveable { mutableStateOf(false) }
     var editor by rememberSaveable { mutableStateOf(false) }
+    var manualEntry by rememberSaveable { mutableStateOf(false) }
+    var historyOpen by rememberSaveable { mutableStateOf(false) }
     var planOpen by rememberSaveable { mutableStateOf(false) }
     var dim by rememberSaveable { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
@@ -180,8 +183,15 @@ fun App(prefs: SharedPreferences, version: String) {
             delay(((60 - sec) * 1000L + 50L).coerceAtLeast(200L))
         }
     }
-    BackHandler(settings || dim || editor || planOpen) {
-        when { editor -> editor = false; settings -> settings = false; dim -> dim = false; else -> planOpen = false }
+    BackHandler(settings || dim || editor || planOpen || historyOpen || manualEntry) {
+        when {
+            editor -> editor = false
+            manualEntry -> manualEntry = false
+            settings -> settings = false
+            historyOpen -> historyOpen = false
+            dim -> dim = false
+            else -> planOpen = false
+        }
     }
     val age = SleepEngine.AGES[ageIndex]
     val plan = age.plans[planIndex.coerceIn(age.plans.indices)]
@@ -194,25 +204,40 @@ fun App(prefs: SharedPreferences, version: String) {
             .setAction(AppWidgetManager.ACTION_APPWIDGET_UPDATE)
             .putExtra(AppWidgetManager.EXTRA_APPWIDGET_IDS, ids))
     }
-    fun store(next: Prefs.Session, label: String) {
-        if (Prefs.saveLive(prefs, next)) {
-            session = next; message = label; error = null; editor = false; now = System.currentTimeMillis()
+    /** Сохранение сессии и журнала одной операцией. */
+    fun store(next: Prefs.Session, newHistory: List<History.Interval>, label: String) {
+        if (Prefs.saveLive(prefs, next) && Prefs.saveHistory(prefs, newHistory)) {
+            session = next; history = newHistory; message = label; error = null
+            editor = false; manualEntry = false; now = System.currentTimeMillis()
             focus.clearFocus()
             updateWidget()
         } else error = "Не удалось сохранить. Попробуй ещё раз."
     }
-    fun act(change: (LiveTracker.State, Long) -> LiveTracker.State) {
+    /**
+     * Записать действие. [at] — null (время телефона) или выбранное вручную
+     * время. Возвращает текст ошибки (для редактора времени) или null.
+     */
+    fun act(change: (LiveTracker.State, Long) -> LiveTracker.State, at: Long? = null): String? {
         val tap = android.os.SystemClock.elapsedRealtime()
-        if (tap - lastTap < 900) return
+        if (tap - lastTap < 900) return null
         lastTap = tap
-        try {
-            val next = change(state, System.currentTimeMillis())
-            store(Prefs.Session(next, state), "Записано ${clock(next.since)}")
-        } catch (e: IllegalArgumentException) { error = e.message ?: "Проверь время телефона" }
+        val time = at ?: System.currentTimeMillis()
+        return try {
+            val prev = state
+            val next = change(prev, time)
+            val logged = History.transition(prev, next, time)
+            store(Prefs.Session(next, prev, logged = logged.size),
+                History.keepRecent(history + logged, time), "Записано ${clock(next.since)}")
+            error
+        } catch (e: IllegalArgumentException) { e.message ?: "Проверь время телефона" }
+    }
+    fun undo() {
+        val u = session.undo ?: return
+        store(Prefs.Session(u), History.dropLast(history, session.logged), "Действие отменено")
     }
     fun resetDay() {
         if (state.phase == LiveTracker.Phase.READY) return
-        store(Prefs.Session(LiveTracker.State(), state), "День сброшен")
+        store(Prefs.Session(LiveTracker.State(), state), History.removeDay(history, state.dayStart), "День сброшен")
     }
     fun config(newAge: Int = ageIndex, newPlan: Int = planIndex, newRegress: Boolean = regress, newFeeds: List<Int> = feeds) {
         if (prefs.edit().putInt("age", newAge).putInt("plan", newPlan)
@@ -243,11 +268,19 @@ fun App(prefs: SharedPreferences, version: String) {
                 verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text(if (settings) "Настройки" else "Дима", fontSize = 24.sp, fontWeight = FontWeight.SemiBold)
-                        Text(if (settings) "BaSleep $version" else "${age.label} · ${plan.name}", fontSize = 13.sp, color = Subtitle)
+                        Text(if (settings) "Настройки" else if (historyOpen) "История" else "Дима", fontSize = 24.sp, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            if (settings) "BaSleep $version"
+                            else if (historyOpen) "Завершённые сны по дням"
+                            else "${age.label} · ${plan.name}",
+                            fontSize = 13.sp, color = Subtitle,
+                        )
                     }
-                    IconPressable(if (settings) R.drawable.ic_back else R.drawable.ic_sliders,
-                        "Настройки", if (settings) "Вернуться к трекеру" else "Открыть настройки") { settings = !settings; editor = false }
+                    IconPressable(if (settings || historyOpen) R.drawable.ic_back else R.drawable.ic_settings,
+                        "Настройки",
+                        if (settings || historyOpen) "Вернуться к трекеру" else "Открыть настройки") {
+                        if (historyOpen) historyOpen = false else { settings = !settings; editor = false }
+                    }
                 }
                 if (error != null) Text(error!!, color = Amber, fontSize = 14.sp)
                 if (session.corrupt) Text(
@@ -289,6 +322,46 @@ fun App(prefs: SharedPreferences, version: String) {
                         }
                         context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, text), "Поделиться планом"))
                     }) { Text("Поделиться планом") }
+                } else if (historyOpen) {
+                    val dayList = remember(history) { History.days(history) }
+                    if (dayList.isEmpty()) Text(
+                        "Пока пусто. Завершённые сны появятся здесь после первого «Проснулся».",
+                        color = Subtitle, fontSize = 14.sp,
+                    )
+                    dayList.forEach { d ->
+                        Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(DarkScheme.surface).padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(dayLabel(d.wakeAt), fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                            Text("Подъём ${clock(d.wakeAt)}", fontSize = 13.sp, color = Subtitle)
+                            d.naps.forEachIndexed { i, nap ->
+                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                    Text("Сон ${i + 1}", fontSize = 13.sp, color = NightTint)
+                                    Text("${clock(nap.start)}–${clock(nap.end)} · ${SleepEngine.fmtDurHuman(nap.minutes)}",
+                                        fontSize = 13.sp, color = Subtitle)
+                                }
+                            }
+                            d.nightWakes.forEach { w ->
+                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                    Text("Проснулся ночью", fontSize = 13.sp, color = Amber)
+                                    Text("${clock(w.start)}–${clock(w.end)} · ${SleepEngine.fmtDurHuman(w.minutes)}",
+                                        fontSize = 13.sp, color = Subtitle)
+                                }
+                            }
+                            d.night?.let { n ->
+                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                    Text("Ночь", fontSize = 13.sp, color = NightTint)
+                                    Text("${clock(n.start)}–${clock(n.end)} · ${SleepEngine.fmtDurHuman(n.minutes)}",
+                                        fontSize = 13.sp, color = Subtitle)
+                                }
+                            }
+                            NormLine("Дневной сон", d.daySleepMin, age.dayMin, age.dayMax, age.dayNormShort)
+                            NormLine("Ночь", d.nightSleepMin, age.nightMin, age.nightMax, age.nightNormShort)
+                            NormLine("Всего сна", d.totalSleepMin, age.totalMin, age.totalMax, age.totalNormShort)
+                            d.dayAwakeMin?.let {
+                                Text("Бодрствование днём ${SleepEngine.fmtDurHuman(it)}", fontSize = 12.sp, color = Subtitle)
+                            }
+                        }
+                    }
                 } else {
                     Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -301,6 +374,12 @@ fun App(prefs: SharedPreferences, version: String) {
                             val duration = ((now - state.since).coerceAtLeast(0) / LiveTracker.MINUTE).toInt()
                             RollingText(SleepEngine.fmtDurHuman(duration), 44.sp, FontWeight.Medium, DarkScheme.onSurface)
                             Text("С ${clock(state.since)}" + daySuffix(state.since, now), color = Subtitle, fontSize = 14.sp)
+                            phaseHint(state, age, forecasts.firstOrNull(), now)?.let { hint ->
+                                Spacer(Modifier.height(2.dp))
+                                Text(hint.text, color = if (hint.over) Amber else Subtitle,
+                                    fontSize = 14.sp, textAlign = TextAlign.Center)
+                                NormBar(hint.fraction, if (hint.over) Amber else accent, Modifier.width(220.dp))
+                            }
                         } else Text("Нажми, когда начнётся ваш день", fontSize = 14.sp, color = Subtitle)
                     }
                     if (state.phase == LiveTracker.Phase.READY) {
@@ -348,20 +427,22 @@ fun App(prefs: SharedPreferences, version: String) {
                             state.phase == LiveTracker.Phase.NIGHT -> "Проснулся"
                         else -> "Уснул"
                     }
+                    val mainAction: (LiveTracker.State, Long) -> LiveTracker.State = when {
+                        startDayNow -> LiveTracker::startDay
+                        nightSleepNow -> LiveTracker::startNight
+                        else -> LiveTracker::toggle
+                    }
                     Pressable(RoundedCornerShape(24.dp), accent, Modifier.fillMaxWidth().heightIn(min = 72.dp),
                         a11y = when {
                             startDayNow -> "Начать день — записать пробуждение"
                             nightSleepNow -> "Ночной сон — записать уход в ночь"
                             else -> "$action — записать время телефона"
                         },
-                        onClick = {
-                            when {
-                                startDayNow -> act(LiveTracker::startDay)
-                                nightSleepNow -> act(LiveTracker::startNight)
-                                else -> act(LiveTracker::toggle)
-                            }
-                        }) {
+                        onClick = { act(mainAction) }) {
                         Text(action, fontSize = 24.sp, color = DarkScheme.onPrimary, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(18.dp))
+                    }
+                    TextButton(onClick = { manualEntry = !manualEntry; editor = false }) {
+                        Text("«$action» в другое время…")
                     }
                     if (state.phase != LiveTracker.Phase.READY) {
                         FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -392,12 +473,23 @@ fun App(prefs: SharedPreferences, version: String) {
                     if (editor) ClockEditor(
                         java.time.Instant.ofEpochMilli(state.since).atZone(java.time.ZoneId.systemDefault()).hour,
                         java.time.Instant.ofEpochMilli(state.since).atZone(java.time.ZoneId.systemDefault()).minute,
+                        title = "Начало текущего события",
                         onCancel = { editor = false }) { h, m ->
                         try {
                             val current = System.currentTimeMillis()
                             val at = LiveTracker.clockTime(h, m, current, java.time.ZoneId.systemDefault())
                             val next = LiveTracker.correct(state, at, current)
-                            store(Prefs.Session(next, state), "Время исправлено: ${clock(at)}"); null
+                            store(Prefs.Session(next, state), history, "Время исправлено: ${clock(at)}"); null
+                        } catch (e: IllegalArgumentException) { e.message ?: "Проверь время" }
+                    }
+                    if (manualEntry) ClockEditor(
+                        java.time.Instant.ofEpochMilli(now).atZone(java.time.ZoneId.systemDefault()).hour,
+                        java.time.Instant.ofEpochMilli(now).atZone(java.time.ZoneId.systemDefault()).minute,
+                        title = "Записать «$action» с указанием времени",
+                        onCancel = { manualEntry = false }) { h, m ->
+                        try {
+                            val at = LiveTracker.clockTime(h, m, System.currentTimeMillis(), java.time.ZoneId.systemDefault())
+                            act(mainAction, at)
                         } catch (e: IllegalArgumentException) { e.message ?: "Проверь время" }
                     }
                     if (night && state.phase == LiveTracker.Phase.NIGHT_AWAKE) {
@@ -406,7 +498,7 @@ fun App(prefs: SharedPreferences, version: String) {
                     if (session.undo != null) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(message ?: "Последнее действие", fontSize = 13.sp, color = Subtitle, modifier = Modifier.weight(1f))
-                            TextButton(onClick = { session.undo?.let { store(Prefs.Session(it), "Действие отменено") } }) { Text("Отменить") }
+                            TextButton(onClick = { undo() }) { Text("Отменить") }
                         }
                     }
                     val next = forecasts.firstOrNull()
@@ -432,6 +524,22 @@ fun App(prefs: SharedPreferences, version: String) {
                             Text("Кормление · ${clock(it)} · ориентир", color = FeedTint, fontSize = 14.sp)
                         }
                     }
+                    if (state.dayStart > 0L) {
+                        val t = History.totals(history, state, now)
+                        Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(DarkScheme.surface).padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text("Итог дня", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                                Text("нормы · ${age.label}", fontSize = 11.sp, color = Subtitle)
+                            }
+                            NormLine("Дневной сон", t.daySleepMin, age.dayMin, age.dayMax, age.dayNormShort, live = true)
+                            NormLine("Ночь", t.nightSleepMin, age.nightMin, age.nightMax, age.nightNormShort, live = true)
+                            NormLine("Всего сна", t.totalSleepMin, age.totalMin, age.totalMax, age.totalNormShort, live = true)
+                            t.dayAwakeMin?.let {
+                                Text("Бодрствование днём ${SleepEngine.fmtDurHuman(it)}", fontSize = 12.sp, color = Subtitle)
+                            }
+                        }
+                    }
                     if (forecasts.size > 1) {
                         TextButton(onClick = { planOpen = !planOpen }) { Text(if (planOpen) "Скрыть план" else "План дальше") }
                         if (planOpen) forecasts.forEach { f ->
@@ -441,6 +549,7 @@ fun App(prefs: SharedPreferences, version: String) {
                             }
                         }
                     }
+                    TextButton(onClick = { historyOpen = true }) { Text("История по дням") }
                     if (dim) TextButton(onClick = { dim = false }) { Text("Обычная яркость") }
                 }
             }
@@ -463,12 +572,91 @@ private fun daySuffix(at: Long, now: Long): String {
     return when { days == 1L -> " · вчера"; days > 1 -> " · ранее"; else -> "" }
 }
 
+/** Заголовок дня в истории: «Сегодня · чт, 6 ноября». */
+private fun dayLabel(dayStart: Long): String {
+    val zone = java.time.ZoneId.systemDefault()
+    val z = java.time.Instant.ofEpochMilli(dayStart).atZone(zone)
+    val today = java.time.LocalDate.now(zone)
+    val formatted = z.format(java.time.format.DateTimeFormatter.ofPattern("EE, d MMMM", java.util.Locale("ru")))
+    return when (z.toLocalDate()) {
+        today -> "Сегодня · $formatted"
+        today.minusDays(1) -> "Вчера · $formatted"
+        else -> formatted
+    }
+}
+
+/** Подсказка под таймером: норма текущей фазы и сколько осталось. */
+private data class PhaseHint(val text: String, val fraction: Float, val over: Boolean)
+
+private fun phaseHint(
+    state: LiveTracker.State,
+    age: SleepEngine.Age,
+    next: LiveTracker.Forecast?,
+    now: Long,
+): PhaseHint? {
+    val duration = ((now - state.since).coerceAtLeast(0) / LiveTracker.MINUTE).toInt()
+    return when (state.phase) {
+        LiveTracker.Phase.AWAKE -> {
+            val base = "Окно ${SleepEngine.fmtDurHuman(duration)} · норма ${SleepEngine.fmtDur(age.wwMin)}–${SleepEngine.fmtDur(age.wwMax)}"
+            if (next == null) {
+                PhaseHint(base, duration.toFloat() / age.hardMax, duration > age.hardMax)
+            } else {
+                val left = ((next.at - now) / LiveTracker.MINUTE).toInt()
+                val total = ((next.at - state.since).coerceAtLeast(LiveTracker.MINUTE) / LiveTracker.MINUTE).toInt()
+                if (left >= 0) PhaseHint("$base · осталось ~${SleepEngine.fmtDurHuman(left)}",
+                    duration.toFloat() / total, duration > age.hardMax)
+                else PhaseHint("$base · окно вышло на ${SleepEngine.fmtDurHuman(-left)}", 1f, true)
+            }
+        }
+        LiveTracker.Phase.NAP -> {
+            if (next == null) PhaseHint("Спит ${SleepEngine.fmtDurHuman(duration)}", 0f, false)
+            else {
+                val left = ((next.at - now) / LiveTracker.MINUTE).toInt()
+                val total = ((next.at - state.since).coerceAtLeast(LiveTracker.MINUTE) / LiveTracker.MINUTE).toInt()
+                if (left >= 0) PhaseHint(
+                    "Ориентир сна ${SleepEngine.fmtDurHuman(total)} · осталось ~${SleepEngine.fmtDurHuman(left)}",
+                    duration.toFloat() / total, false)
+                else PhaseHint("Спит дольше ориентира на ${SleepEngine.fmtDurHuman(-left)}", 1f, true)
+            }
+        }
+        LiveTracker.Phase.NIGHT ->
+            PhaseHint("Ночь ${SleepEngine.fmtDurHuman(duration)} · ${age.nightNormShort}",
+                duration.toFloat() / age.nightMax, duration > age.nightMax)
+        LiveTracker.Phase.NIGHT_AWAKE ->
+            PhaseHint("Ночное бодрствование ${SleepEngine.fmtDurHuman(duration)}", 0f, false)
+        LiveTracker.Phase.READY -> null
+    }
+}
+
+/** Тонкий прогресс-бар под таймером. */
 @Composable
-private fun ClockEditor(initialHour: Int, initialMinute: Int, onCancel: () -> Unit, onSave: (Int, Int) -> String?) {
+private fun NormBar(fraction: Float, color: Color, modifier: Modifier = Modifier) {
+    Box(modifier.height(6.dp).clip(RoundedCornerShape(50)).background(DarkScheme.surfaceVariant)) {
+        Box(Modifier.fillMaxWidth(fraction.coerceIn(0f, 1f)).height(6.dp)
+            .clip(RoundedCornerShape(50)).background(color))
+    }
+}
+
+/** Строка «показатель — значение · норма», янтарным при выходе за норму.
+ *  [live] — текущий незавершённый день: ниже нормы ещё нормально, янтарный
+ *  только при превышении максимума. */
+@Composable
+private fun NormLine(label: String, valueMin: Int, min: Int, max: Int, normShort: String, live: Boolean = false) {
+    val out = if (live) valueMin > max else valueMin !in min..max
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+        Text(label, fontSize = 13.sp, color = Subtitle)
+        Text("${SleepEngine.fmtDurHuman(valueMin)} · $normShort",
+            fontSize = 13.sp, color = if (out) Amber else FeedTint)
+    }
+}
+
+@Composable
+private fun ClockEditor(initialHour: Int, initialMinute: Int, title: String? = null, onCancel: () -> Unit, onSave: (Int, Int) -> String?) {
     var h by rememberSaveable(initialHour, initialMinute) { mutableStateOf("%02d".format(initialHour)) }
     var m by rememberSaveable(initialHour, initialMinute) { mutableStateOf("%02d".format(initialMinute)) }
     var error by remember { mutableStateOf<String?>(null) }
     Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(DarkScheme.surface).padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        if (title != null) Text(title, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             OutlinedTextField(h, { h = it.filter(Char::isDigit).take(2) }, label = { Text("Часы") },
                 modifier = Modifier.weight(1f), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), singleLine = true)
