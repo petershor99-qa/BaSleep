@@ -40,13 +40,13 @@ SharedPreferences не удаляются, но поправки калькул�
 ## Сборка и проверка в Windows PowerShell
 
 Нужны JDK 17, Android SDK 35, Gradle 8.11.1. Локальная рабочая копия:
-`F:\BaSleep` (путь сборки без кириллицы).
+`F:\BaSleep` (путь сборки без кириллицы). Тулчейн на этой машине: `F:\android`.
 
 ```powershell
-$env:JAVA_HOME = 'D:\Z\android\jdk\jdk-17.0.20.1+1'
-$env:ANDROID_HOME = 'D:\Z\android\sdk'
-Set-Location 'D:\Z\apps\sleep-schedule'
-& 'D:\Z\android\gradle\gradle-8.11.1\bin\gradle.bat' :app:testDebugUnitTest :app:assembleDebug
+$env:JAVA_HOME = 'F:\android\jdk'
+$env:ANDROID_HOME = 'F:\android\sdk'
+Set-Location 'F:\BaSleep'
+& 'F:\android\gradle-8.11.1\bin\gradle.bat' :app:testDebugUnitTest :app:assembleDebug
 ```
 
 APK: `app/build/outputs/apk/debug/app-debug.apk`.

@@ -26,11 +26,11 @@ object History {
         if (raw.isNullOrBlank()) return emptyList()
         return raw.lineSequence().mapNotNull { line ->
             val p = line.split('|')
-            if (p.size != 4) return@mapSequence null
-            val day = p[0].toLongOrNull() ?: return@mapSequence null
-            val start = p[1].toLongOrNull() ?: return@mapSequence null
-            val end = p[2].toLongOrNull() ?: return@mapSequence null
-            val kind = runCatching { Kind.valueOf(p[3]) }.getOrNull() ?: return@mapSequence null
+            if (p.size != 4) return@mapNotNull null
+            val day = p[0].toLongOrNull() ?: return@mapNotNull null
+            val start = p[1].toLongOrNull() ?: return@mapNotNull null
+            val end = p[2].toLongOrNull() ?: return@mapNotNull null
+            val kind = runCatching { Kind.valueOf(p[3]) }.getOrNull() ?: return@mapNotNull null
             if (day <= 0 || end < start) null else Interval(day, start, end, kind)
         }.toList()
     }
