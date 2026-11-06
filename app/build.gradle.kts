@@ -7,19 +7,23 @@ plugins {
 }
 
 /**
- * Релизный ключ лежит в папке keystore/ в корне проекта (НЕ в git — см. .gitignore).
- * Чтобы собирать релиз на новом компьютере: положить туда два файла —
- * basleep.keystore и keystore.properties (перенести со старого компа).
- * Если файлов нет, release-сборка подписывается debug-ключом (для проверки),
- * а для установки поверх релиза всё равно нужен настоящий ключ.
+ * Релизный ключ НЕ хранится в репозитории (репо публичный). Сборка ищет
+ * basleep.keystore + keystore.properties по местам по порядку:
+ *   1. keystore/ в корне проекта (в .gitignore);
+ *   2. G:/Мой диск/apps-keys/basleep/ — личный Google Диск владельца,
+ *      синхронизируется на все его компьютеры автоматически.
+ * Если ключ не найден, release подписывается debug-ключом с предупреждением —
+ * поверх релиза такой APK не встанет.
  */
-val keystoreDir = rootProject.file("keystore")
+val keystoreDir = listOf(
+    rootProject.file("keystore"),
+    File("G:/Мой диск/apps-keys/basleep"),
+).firstOrNull { File(it, "basleep.keystore").exists() && File(it, "keystore.properties").exists() }
 val keystoreProps = Properties().apply {
-    val f = File(keystoreDir, "keystore.properties")
-    if (f.exists()) f.inputStream().use { load(it) }
+    val f = keystoreDir?.let { File(it, "keystore.properties") }
+    if (f != null) f.inputStream().use { load(it) }
 }
-val hasReleaseKey = File(keystoreDir, "basleep.keystore").exists() &&
-    keystoreProps.getProperty("storePassword") != null
+val hasReleaseKey = keystoreDir != null && keystoreProps.getProperty("storePassword") != null
 
 android {
     namespace = "com.family.sleepschedule"
