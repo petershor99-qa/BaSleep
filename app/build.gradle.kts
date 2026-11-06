@@ -6,11 +6,20 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
-/** Релизный ключ лежит вне репозитория (F:\android); пароли — в keystore.properties. */
+/**
+ * Релизный ключ лежит в папке keystore/ в корне проекта (НЕ в git — см. .gitignore).
+ * Чтобы собирать релиз на новом компьютере: положить туда два файла —
+ * basleep.keystore и keystore.properties (перенести со старого компа).
+ * Если файлов нет, release-сборка подписывается debug-ключом (для проверки),
+ * а для установки поверх релиза всё равно нужен настоящий ключ.
+ */
+val keystoreDir = rootProject.file("keystore")
 val keystoreProps = Properties().apply {
-    val f = file("F:/android/keystore.properties")
+    val f = File(keystoreDir, "keystore.properties")
     if (f.exists()) f.inputStream().use { load(it) }
 }
+val hasReleaseKey = File(keystoreDir, "basleep.keystore").exists() &&
+    keystoreProps.getProperty("storePassword") != null
 
 android {
     namespace = "com.family.sleepschedule"
@@ -24,19 +33,27 @@ android {
         versionName = "1.14"
     }
 
-    signingConfigs {
-        create("release") {
-            storeFile = file("F:/android/basleep.keystore")
-            storePassword = keystoreProps.getProperty("storePassword")
-            keyAlias = "basleep"
-            keyPassword = keystoreProps.getProperty("keyPassword")
+    if (hasReleaseKey) {
+        signingConfigs {
+            create("release") {
+                storeFile = File(keystoreDir, "basleep.keystore")
+                storePassword = keystoreProps.getProperty("storePassword")
+                keyAlias = "basleep"
+                keyPassword = keystoreProps.getProperty("keyPassword")
+            }
         }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("release")
+            if (hasReleaseKey) {
+                signingConfig = signingConfigs.getByName("release")
+            } else {
+                logger.warn("keystore/basleep.keystore не найден — release подписан debug-ключом. " +
+                    "Положите basleep.keystore и keystore.properties в папку keystore/ проекта.")
+                signingConfig = signingConfigs.getByName("debug")
+            }
         }
     }
 

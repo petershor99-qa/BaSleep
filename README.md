@@ -49,14 +49,20 @@ Set-Location 'F:\BaSleep'
 & 'F:\android\gradle-8.11.1\bin\gradle.bat' :app:testDebugUnitTest :app:assembleDebug
 ```
 
-Релизная сборка (подпись постоянным ключом `F:\android\basleep.keystore`,
-пароли в `F:\android\keystore.properties`, оба файла вне репозитория — не терять!):
+Релизная сборка:
 
 ```powershell
 & 'F:\android\gradle-8.11.1\bin\gradle.bat' :app:assembleRelease
 ```
 
 APK: `app/build/outputs/apk/release/app-release.apk`.
+
+**Ключ подписи релиза** — папка `keystore/` в корне проекта (в git не попадает):
+`basleep.keystore` + `keystore.properties`. Новый компьютер / новая рабочая копия:
+скопируй туда эти два файла со старого компа (Telegram «Избранное», флешка) —
+и `:app:assembleRelease` подпишет тем же ключом, обновление встанет поверх.
+Без файлов релиз соберётся, но с debug-подписью (поверх релиза не встанет).
+Не терять и не коммитить: потеря ключа = обновления больше не ставятся поверх.
 
 42 теста: 27 регрессионных тестов старого калькулятора и 15 тестов LiveTracker.
 UI проверяется отдельно на эмуляторе; сборка не заменяет проверку сценариев.
