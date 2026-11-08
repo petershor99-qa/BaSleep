@@ -673,14 +673,15 @@ fun App(prefs: SharedPreferences, version: String) {
                                 }
                             }
 
-                            // Факт дня
+                            // Факт дня — плитками
                             if (state.dayStart > 0L) {
                                 val t = History.totals(history, state, now)
                                 Spacer(Modifier.height(2.dp))
-                                Text("Факт", fontSize = 12.sp, color = Subtitle)
-                                NormLine("Дневной сон", t.daySleepMin, age.dayMin, age.dayMax, age.dayNormShort, live = true)
-                                NormLine("Ночь", t.nightSleepMin, age.nightMin, age.nightMax, age.nightNormShort, live = true)
-                                NormLine("Всего сна", t.totalSleepMin, age.totalMin, age.totalMax, age.totalNormShort, live = true)
+                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    FactTile("Днём", t.daySleepMin, age.dayNormShort, Modifier.weight(1f))
+                                    FactTile("Ночью", t.nightSleepMin, age.nightNormShort, Modifier.weight(1f))
+                                    FactTile("Всего", t.totalSleepMin, age.totalNormShort, Modifier.weight(1f))
+                                }
                                 t.dayAwakeMin?.let {
                                     Text("Бодрствование днём ${SleepEngine.fmtDurHuman(it)}", fontSize = 12.sp, color = Subtitle)
                                 }
@@ -795,6 +796,30 @@ private fun NormLine(label: String, valueMin: Int, min: Int, max: Int, normShort
         Text(label, fontSize = 13.sp, color = Subtitle)
         Text("${SleepEngine.fmtDurHuman(valueMin)} · $normShort",
             fontSize = 13.sp, color = if (out) Amber else FeedTint)
+    }
+}
+
+/** Плитка факта: значение крупно, под ним подпись и норма. */
+@Composable
+private fun FactTile(label: String, minutes: Int, norm: String, modifier: Modifier = Modifier) {
+    val over = when (label) {
+        "Ночью" -> minutes > 12 * 60
+        "Всего" -> minutes > 17 * 60
+        else -> minutes > 5 * 60
+    }
+    Column(
+        modifier
+            .clip(RoundedCornerShape(12.dp))
+            .background(MutedBg)
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(
+            SleepEngine.fmtDurHuman(minutes), fontSize = 15.sp, fontWeight = FontWeight.Bold,
+            color = if (over) Amber else DarkScheme.onSurface, style = Tabular,
+        )
+        Text(label, fontSize = 11.sp, color = Subtitle)
+        Text(norm, fontSize = 9.sp, color = DarkScheme.onSurfaceVariant)
     }
 }
 
