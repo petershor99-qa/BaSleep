@@ -639,10 +639,23 @@ fun App(prefs: SharedPreferences, version: String) {
                                     }
                                     Text(clock(next.at), fontSize = 22.sp, color = accent, style = Tabular)
                                 }
-                                if (next.at < now) Text(
-                                    "Ориентир прошёл. Запиши событие, когда оно случится.",
-                                    fontSize = 12.sp, color = Subtitle,
-                                )
+                                if (next.at < now) {
+                                    Text(
+                                        "Ориентир прошёл. Запиши событие, когда оно случится.",
+                                        fontSize = 12.sp, color = Subtitle,
+                                    )
+                                } else if (state.phase == LiveTracker.Phase.AWAKE) {
+                                    // Расшифровка: из чего складывается окно до этого сна (§запрос v1.18)
+                                    SleepEngine.windowBreakdown(state, age, plan, regress)?.let { bd ->
+                                        val parts = bd.reasons.joinToString(", ")
+                                        Text(
+                                            "Окно ${SleepEngine.fmtDurHuman(bd.totalMin)}: план ${SleepEngine.fmtDurHuman(bd.baseMin)}" +
+                                                if (bd.compMin != 0 || bd.regimeMin != 0) ", " + parts else " — без поправок",
+                                            fontSize = 12.sp, color = Subtitle,
+                                            style = Tabular,
+                                        )
+                                    }
+                                }
                             }
 
                             // Лента дня: факт (записанное) + прогноз; тап — правка текущего события

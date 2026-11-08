@@ -631,6 +631,41 @@ object SleepEngine {
         else d.atStartOfDay(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
     } catch (_: Exception) { null }
 
+    /**
+     * Расшифровка окна бодрствования перед ближайшим сном (§«почему в 16:39»):
+     * из чего складывается окно — план, компенсация за короткий/длинный сон,
+     * режим сокращения. [reasons] — человеческие пояснения по каждой добавке.
+     * null — расшифровка неприменима (фаза не «бодрствую»).
+     */
+    data class WindowBreakdown(
+        val baseMin: Int,
+        val compMin: Int,
+        val regimeMin: Int,
+        val totalMin: Int,
+        val reasons: List<String>,
+    )
+
+    fun windowBreakdown(
+        state: LiveTracker.State,
+        age: Age,
+        plan: NapPlan,
+        regress: Boolean,
+    ): WindowBreakdown? {
+        if (state.phase != LiveTracker.Phase.AWAKE) return null
+        val idx = state.completedNaps.coerceAtMost(plan.naps)
+        val base = plan.wakeWindows[idx]
+        val comp = if (state.completedNaps > 0 && state.lastNapMinutes != null)
+            (state.lastNapMinutes - plan.napDurations[(state.completedNaps - 1).coerceAtMost(plan.naps - 1)])
+                .coerceIn(-COMP_MAX, COMP_MAX) else 0
+        val regime = if (regress) -REGRESS_STEP else 0
+        val reasons = mutableListOf<String>()
+        if (comp < 0) reasons.add("−${-comp} мин — прошлый сон был короче плана")
+        if (comp > 0) reasons.add("+${comp} мин — прошлый сон был длиннее плана")
+        if (regime != 0) reasons.add("−${-regime} мин — режим сокращения окон")
+        if (reasons.isEmpty()) reasons.add("окно по плану, без поправок")
+        return WindowBreakdown(base, comp, regime, base + comp + regime, reasons)
+    }
+
     /** Подсказка под таймером: норма фазы, остаток, over/near. */
     data class PhaseHint(val text: String, val fraction: Float, val over: Boolean, val near: Boolean)
 
