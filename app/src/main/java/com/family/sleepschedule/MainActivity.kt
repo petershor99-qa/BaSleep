@@ -177,6 +177,7 @@ fun App(prefs: SharedPreferences, version: String) {
     var childName by remember {
         mutableStateOf(prefs.getString("childName", null)?.takeIf { it.isNotBlank() } ?: "Малыш")
     }
+    var birthDate by remember { mutableStateOf(prefs.getLong("birthDate", 0L).takeIf { it > 0L }) }
     var settings by rememberSaveable { mutableStateOf(false) }
     var editor by rememberSaveable { mutableStateOf(false) }
     var manualEntry by rememberSaveable { mutableStateOf(false) }
@@ -270,6 +271,12 @@ fun App(prefs: SharedPreferences, version: String) {
     val localHour = java.time.Instant.ofEpochMilli(now).atZone(java.time.ZoneId.systemDefault()).hour
     val nightAvailable = localHour >= 21 || localHour < 6
     val nightSleepNow = state.phase == LiveTracker.Phase.AWAKE && nightAvailable
+    // Возраст по дате рождения: «3 мес 22 дн» или null, если дата не задана
+    val computedAge = remember(birthDate, now) { childAgeText(birthDate) }
+    val ageMismatch = remember(computedAge, age) {
+        computedAge?.let { text -> SleepEngine.AGES.firstOrNull { text.startsWith("${it.months} мес") }?.months != age.months }
+            ?: false
+    }
     val accent by animateColorAsState(
         if (state.phase == LiveTracker.Phase.NAP || night || nightSleepNow) NightTint else DarkScheme.primary,
         label = "stateColor",
@@ -293,7 +300,7 @@ fun App(prefs: SharedPreferences, version: String) {
                         Text(
                             if (settings) "BaSleep $version"
                             else if (historyOpen) "Завершённые сны по дням"
-                            else "${age.label} · ${plan.name}",
+                            else "${computedAge ?: age.label} · ${plan.name}",
                             fontSize = 13.sp, color = Subtitle,
                         )
                     }
@@ -304,13 +311,19 @@ fun App(prefs: SharedPreferences, version: String) {
                     }
                 }
                 if (error != null) Text(error!!, color = Amber, fontSize = 14.sp)
+                if (!settings && !historyOpen && ageMismatch && computedAge != null) Text(
+                    "⚠️ $childName уже ${computedAge.substringBefore(" ·")} — переключи схему в настройках",
+                    color = Amber, fontSize = 13.sp,
+                )
                 if (session.corrupt) Text(
                     "Не удалось прочитать предыдущее состояние — начали с чистого листа",
                     color = Amber, fontSize = 13.sp,
                 )
                 if (settings) {
                     Text("Имя ребёнка", fontSize = 16.sp)
-                    var nameDraft by remember(childName) { mutableStateOf(childName) }
+                    var nameDraft by remember(childName) {
+                        mutableStateOf(if (childName == "Малыш") "" else childName)
+                    }
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedTextField(
                             nameDraft,
@@ -323,6 +336,30 @@ fun App(prefs: SharedPreferences, version: String) {
                             childName = nameDraft.trim().ifEmpty { "Малыш" }
                             prefs.edit().putString("childName", childName).apply()
                             updateWidget()
+                        })
+                    }
+                    Text("Дата рождения (для автоматического возраста)", fontSize = 16.sp)
+                    var birthDraft by remember(birthDate) {
+                        mutableStateOf(birthDate?.let {
+                            java.time.Instant.ofEpochMilli(it).atZone(java.time.ZoneId.systemDefault())
+                                .format(java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy"))
+                        } ?: "")
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            birthDraft,
+                            { birthDraft = it.take(10) },
+                            label = { Text("ДД.ММ.ГГГГ") },
+                            modifier = Modifier.weight(1f),
+                            singleLine = true,
+                        )
+                        FactPill("Сохранить", {
+                            val parsed = parseBirthDate(birthDraft)
+                            if (parsed != null) {
+                                birthDate = parsed
+                                prefs.edit().putLong("birthDate", parsed).apply()
+                                updateWidget()
+                            } else error = "Формат: ДД.ММ.ГГГГ, не в будущем"
                         })
                     }
                     Text("Схема для прогноза", fontSize = 16.sp)
@@ -407,6 +444,10 @@ fun App(prefs: SharedPreferences, version: String) {
                     val breath by breathing.animateFloat(
                         1f, 1.05f,
                         infiniteRepeatable(tween(2200), RepeatMode.Reverse), label = "breathScale",
+                    )
+                    val markerPulse by breathing.animateFloat(
+                        1f, 0.35f,
+                        infiniteRepeatable(tween(1500), RepeatMode.Reverse), label = "markerPulse",
                     )
                     Column(
                         Modifier
@@ -610,7 +651,7 @@ fun App(prefs: SharedPreferences, version: String) {
                                     var cursor = 0
                                     segments.forEach { seg ->
                                         val isNow = nowMin > cursor && nowMin <= seg.end
-                                        Box(
+                                        BoxWithConstraints(
                                             Modifier
                                                 .weight(seg.dur.toFloat().coerceAtLeast(1f))
                                                 .fillMaxSize()
@@ -621,14 +662,27 @@ fun App(prefs: SharedPreferences, version: String) {
                                                         else -> DarkScheme.surfaceVariant
                                                     }
                                                 )
-                                        )
+                                        ) {
+                                            if (seg.isNap && maxWidth >= 34.dp) {
+                                                Text(
+                                                    "${seg.label.takeLast(1)}",
+                                                    fontSize = 9.sp, color = Color.White.copy(alpha = 0.9f),
+                                                    modifier = Modifier.align(Alignment.Center),
+                                                )
+                                            }
+                                        }
                                         cursor += seg.dur
                                     }
                                 }
                                 Row(Modifier.fillMaxSize()) {
                                     val left = frac.coerceIn(0.002f, 0.998f)
                                     Spacer(Modifier.weight(left))
-                                    Box(Modifier.width(2.dp).fillMaxSize().background(Color.White.copy(alpha = 0.85f)))
+                                    Box(
+                                        Modifier
+                                            .width(3.dp)
+                                            .fillMaxSize()
+                                            .background(Color.White.copy(alpha = markerPulse))
+                                    )
                                     Spacer(Modifier.weight(1f - left))
                                 }
                             }
@@ -705,6 +759,29 @@ fun App(prefs: SharedPreferences, version: String) {
         }
     }
 }
+
+/** Возраст текстом по дате рождения: «3 мес 22 дн», «110 дн» для первого месяца. */
+private fun childAgeText(birth: Long?): String? {
+    if (birth == null || birth <= 0L) return null
+    val zone = java.time.ZoneId.systemDefault()
+    val b = java.time.Instant.ofEpochMilli(birth).atZone(zone).toLocalDate()
+    val today = java.time.LocalDate.now(zone)
+    val totalDays = java.time.temporal.ChronoUnit.DAYS.between(b, today)
+    if (totalDays < 0) return null
+    val months = java.time.temporal.ChronoUnit.MONTHS.between(b, today)
+    val daysRest = totalDays - java.time.temporal.ChronoUnit.DAYS.between(b, b.plusMonths(months))
+    return when {
+        months < 1 -> "$totalDays дн"
+        else -> "$months мес${if (daysRest > 0) " $daysRest дн" else ""}"
+    }
+}
+
+/** Парс даты рождения «ДД.ММ.ГГГГ»; null при ошибке или дате в будущем. */
+private fun parseBirthDate(text: String): Long? = try {
+    val d = java.time.LocalDate.parse(text.trim(), java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy"))
+    if (d.isAfter(java.time.LocalDate.now())) null
+    else d.atStartOfDay(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
+} catch (_: Exception) { null }
 
 private fun phaseTitle(phase: LiveTracker.Phase): String = when (phase) {
     LiveTracker.Phase.READY -> "Начнём день"
