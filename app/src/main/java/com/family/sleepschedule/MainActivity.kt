@@ -402,14 +402,11 @@ fun App(prefs: SharedPreferences, version: String) {
                         Text(if (state.phase == LiveTracker.Phase.READY) "Запись уже чистая" else "Начать новый день (сброс записи)")
                     }
                     TextButton(onClick = { dim = !dim; settings = false }) { Text(if (dim) "Обычная яркость" else "Тусклый экран") }
-                    TextButton(onClick = {
-                        val text = buildString {
-                            append("$childName · ").append(phaseTitle(state.phase))
-                            if (state.phase != LiveTracker.Phase.READY) append(" с ").append(clock(state.since))
-                            forecasts.forEach { append("\n").append(clock(it.at)).append(" · ").append(it.title).append(" (прогноз)") }
-                        }
-                        context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, text), "Поделиться планом"))
-                    }) { Text("Поделиться планом") }
+                                        TextButton(onClick = {
+                        val text = LiveTracker.exportDay(history, state, now, childName, java.time.ZoneId.systemDefault())
+                        context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, text), "Поделиться днём"))
+                    }) { Text("Поделиться днём") }
+
                 } else if (historyOpen) {
                     val dayList = remember(history) { History.days(history) }
                     if (dayList.isEmpty()) Text(
@@ -624,26 +621,16 @@ fun App(prefs: SharedPreferences, version: String) {
                             TextButton(onClick = { undo() }) { Text("Отменить") }
                         }
                     }
-                    // ── Карточка «День»: план-полоса, остатки, факт, дальнейший план ──
+                    // ── Карточка «День»: лента факт+прогноз, ориентир, факт, план ──
                     if (state.phase != LiveTracker.Phase.READY) {
                         val zone = java.time.ZoneId.systemDefault()
-                        val bar = SleepEngine.dayBar(age, plan, regress, state.dayStart, now, zone)
-                        // Ночью: идущая сейчас ночь, иначе последняя завершённая (или «—»)
-                        val liveNight = state.phase == LiveTracker.Phase.NIGHT
-                        val nightMinutes = if (liveNight) SleepEngine.nightSleepMinutes(history, state, now)
-                            else History.days(history).firstOrNull()?.night?.minutes
-                        val nightLabel = when {
-                            liveNight -> "Ночью сейчас"
-                            nightMinutes != null -> "Прошлая ночь"
-                            else -> "Ночью"
-                        }
-                        val nightText = nightMinutes?.let { SleepEngine.fmtDurHuman(it) } ?: "—"
+                        val tl = LiveTracker.dayTimeline(history, state, now, forecasts)!!
+                        // Инвариант: non-READY всегда имеет dayStart > 0 → dayTimeline не null.
 
                         Column(
                             Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(DarkScheme.surface).padding(14.dp),
                             verticalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
-                            Text("План дня", fontSize = 12.sp, color = Subtitle)
                             forecasts.firstOrNull()?.let { next ->
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Column(Modifier.weight(1f)) {
@@ -658,7 +645,7 @@ fun App(prefs: SharedPreferences, version: String) {
                                 )
                             }
 
-                            // Полоса дня: тап — правка текущего события; зона нажатия от 48 dp
+                            // Лента дня: факт (записанное) + прогноз; тап — правка текущего события
                             Box(
                                 Modifier
                                     .fillMaxWidth()
@@ -673,46 +660,45 @@ fun App(prefs: SharedPreferences, version: String) {
                                         .clip(RoundedCornerShape(50))
                                         .background(MutedBg)
                                         .semantics {
-                                            contentDescription = "План дня: фиолетовое — сон, тёмное — бодрствование. " +
-                                                "Сейчас по плану: " +
-                                                (bar.currentIndex.takeIf { it >= 0 }?.let { bar.segments[it].label } ?: "после отбоя") +
-                                                ". Нажатие — исправить время текущего события."
+                                            contentDescription = "Лента дня: фиолетовое — сон, тёмное — бодрствование. " +
+                                                "Белая черта — сейчас. Нажатие — исправить время текущего события."
                                         },
                                 ) {
                                     val barMaxWidth = maxWidth
                                     Row(Modifier.fillMaxSize()) {
-                                        bar.segments.forEachIndexed { i, seg ->
-                                            val isCurrent = i == bar.currentIndex
+                                        var napN = 0
+                                        tl.segments.forEachIndexed { i, seg ->
+                                            val isLive = i == tl.liveIndex
+                                            val w = seg.dur.toFloat().coerceAtLeast(1f)
+                                            val bg = when {
+                                                seg.isSleep && seg.isFact -> NightTint
+                                                seg.isSleep -> NightTint.copy(alpha = 0.40f)
+                                                seg.isFact -> DarkScheme.surfaceVariant
+                                                else -> MutedBg
+                                            }
                                             Box(
                                                 Modifier
-                                                    .weight(seg.dur.toFloat().coerceAtLeast(1f))
+                                                    .weight(w)
                                                     .fillMaxSize()
-                                                    .background(
-                                                        when {
-                                                            isCurrent && seg.isNap -> NightTint
-                                                            isCurrent -> lerp(DarkScheme.surfaceVariant, Color.White, 0.12f)
-                                                            seg.isNap -> NightTint.copy(alpha = 0.40f)
-                                                            else -> DarkScheme.surfaceVariant
-                                                        }
-                                                    )
+                                                    .background(bg)
                                                     .border(
                                                         1.dp,
-                                                        if (isCurrent) Color.White.copy(alpha = 0.85f) else Color.Transparent,
+                                                        if (isLive) Color.White.copy(alpha = 0.85f) else Color.Transparent,
                                                         RoundedCornerShape(4.dp),
                                                     ),
                                                 contentAlignment = Alignment.Center,
                                             ) {
-                                                if (seg.isNap && barMaxWidth * (seg.dur.toFloat() / bar.dayLen) >= 34.dp) {
-                                                    Text(
-                                                        seg.label.takeLast(1),
-                                                        fontSize = 9.sp, color = Color.White.copy(alpha = 0.9f),
-                                                    )
+                                                if (seg.isSleep && seg.isFact) {
+                                                    napN++
+                                                    if (barMaxWidth * (w / tl.endRel) >= 34.dp) {
+                                                        Text("$napN", fontSize = 9.sp, color = Color.White.copy(alpha = 0.9f))
+                                                    }
                                                 }
                                             }
                                         }
                                     }
                                     Row(Modifier.fillMaxSize()) {
-                                        val left = bar.markerFrac.coerceIn(0.002f, 0.998f)
+                                        val left = tl.markerFrac.coerceIn(0.002f, 0.998f)
                                         Spacer(Modifier.weight(left))
                                         Box(Modifier.width(3.dp).fillMaxSize().background(Color.White.copy(alpha = 0.85f)))
                                         Spacer(Modifier.weight(1f - left))
@@ -720,42 +706,17 @@ fun App(prefs: SharedPreferences, version: String) {
                                 }
                             }
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                Text(SleepEngine.fmtClock(bar.wakeTod), fontSize = 11.sp, color = Subtitle, style = Tabular)
+                                Text(clock(state.dayStart), fontSize = 11.sp, color = Subtitle, style = Tabular)
                                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                                     Text("Фиолетовый — сон", fontSize = 11.sp, color = NightTint)
                                     Text("Тёмный — бодрствование", fontSize = 11.sp, color = Subtitle)
                                 }
-                                Text(SleepEngine.fmtClock(bar.bedtimeTod), fontSize = 11.sp, color = Subtitle, style = Tabular)
+                                Text(clock(state.dayStart + tl.endRel * LiveTracker.MINUTE), fontSize = 11.sp, color = Subtitle, style = Tabular)
                             }
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
                                 Text("▲ сейчас", fontSize = 11.sp, color = Subtitle)
                             }
 
-                            // Остатки по плану (из модели полосы)
-                            if (night) {
-                                val next = forecasts.firstOrNull()
-                                val right = when {
-                                    next == null -> nightText
-                                    next.at >= now -> "до подъёма ~${SleepEngine.fmtDurHuman(((next.at - now) / LiveTracker.MINUTE).toInt())}"
-                                    else -> "ориентир подъёма прошёл"
-                                }
-                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                    Text("🌙 Ночь идёт", fontSize = 13.sp, color = NightTint)
-                                    Text(right, fontSize = 13.sp, color = NightTint, style = Tabular)
-                                }
-                            } else {
-                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                    Text("😴 Спать осталось", fontSize = 13.sp, color = Subtitle)
-                                    Text(
-                                        "~${SleepEngine.fmtDurHuman(bar.remainingSleepMin)} из ${SleepEngine.fmtDurHuman(bar.segments.filter { it.isNap }.sumOf { it.dur })}",
-                                        fontSize = 13.sp, color = NightTint, style = Tabular,
-                                    )
-                                }
-                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                    Text("⏱ Бодрствовать", fontSize = 13.sp, color = Subtitle)
-                                    Text("до отбоя ~${SleepEngine.fmtDurHuman(bar.untilBedMin)}", fontSize = 13.sp, color = DarkScheme.onSurfaceVariant, style = Tabular)
-                                }
-                            }
                             LiveTracker.nextFeed(feeds, now, zone)?.let {
                                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                                     Text("Кормление · ориентир", fontSize = 13.sp, color = FeedTint)
@@ -766,13 +727,24 @@ fun App(prefs: SharedPreferences, version: String) {
                             // Факт дня — сворачиваемый блок
                             var factsOpen by rememberSaveable { mutableStateOf(false) }
                             val t = History.totals(history, state, now)
+                            // Ночью: идущая сейчас ночь, иначе последняя завершённая (или «—»)
+                            val liveNight = state.phase == LiveTracker.Phase.NIGHT
+                            val nightMinutes = if (liveNight) SleepEngine.nightSleepMinutes(history, state, now)
+                                else History.days(history).firstOrNull()?.night?.minutes
+                            val nightLabel = when {
+                                liveNight -> "Ночью сейчас"
+                                nightMinutes != null -> "Прошлой ночью"
+                                else -> "Ночью"
+                            }
+                            val nightText = nightMinutes?.let { SleepEngine.fmtDurHuman(it) } ?: "—"
+                            val totalMin = t.daySleepMin + (nightMinutes ?: 0)
                             Row(
                                 Modifier.fillMaxWidth().clickable { factsOpen = !factsOpen }.padding(vertical = 4.dp),
                                 horizontalArrangement = Arrangement.SpaceBetween,
                             ) {
                                 Text("Факт", fontSize = 12.sp, color = Subtitle)
                                 Text(
-                                    "днём ${SleepEngine.fmtDurHuman(t.daySleepMin)} · всего ${SleepEngine.fmtDurHuman(t.daySleepMin + (nightMinutes ?: 0))}",
+                                    "днём ${SleepEngine.fmtDurHuman(t.daySleepMin)} · всего ${SleepEngine.fmtDurHuman(totalMin)}",
                                     fontSize = 12.sp, color = Subtitle, style = Tabular,
                                 )
                                 Text(if (factsOpen) "▾" else "▸", fontSize = 12.sp, color = Subtitle)
@@ -781,7 +753,7 @@ fun App(prefs: SharedPreferences, version: String) {
                                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                     FactTile("Днём сегодня", SleepEngine.fmtDurHuman(t.daySleepMin), age.dayNormShort, t.daySleepMin >= age.dayMax - 15, Modifier.weight(1f))
                                     FactTile(nightLabel, nightText, age.nightNormShort, (nightMinutes ?: 0) >= age.nightMax - 15, Modifier.weight(1f))
-                                    FactTile("Всего за сутки", SleepEngine.fmtDurHuman(t.daySleepMin + (nightMinutes ?: 0)), age.totalNormShort, (t.daySleepMin + (nightMinutes ?: 0)) >= age.totalMax - 15, Modifier.weight(1f))
+                                    FactTile("Всего за сутки", SleepEngine.fmtDurHuman(totalMin), age.totalNormShort, totalMin >= age.totalMax - 15, Modifier.weight(1f))
                                 }
                                 t.dayAwakeMin?.let {
                                     Text("Бодрствование днём ${SleepEngine.fmtDurHuman(it)}", fontSize = 12.sp, color = Subtitle)
@@ -799,6 +771,7 @@ fun App(prefs: SharedPreferences, version: String) {
                             }
                         }
                     }
+
                     TextButton(onClick = { historyOpen = true }) { Text("История по дням") }
                     if (dim) TextButton(onClick = { dim = false }) { Text("Обычная яркость") }
                 }

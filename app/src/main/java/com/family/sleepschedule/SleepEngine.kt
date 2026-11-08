@@ -411,7 +411,7 @@ object SleepEngine {
         val p = placeFeeds(s, feeds)
         val sb = StringBuilder()
         sb.append("Режим сна — ").append(age.label).append(" · ").append(plan.name).append('\n')
-        sb.append("Подъём ").append(fmtClock(s.wake)).append('\n')
+        sb.append("Подъём ").append(SleepEngine.fmtClock(s.wake)).append('\n')
         for ((i, nap) in s.naps.withIndex()) {
             sb.append('\n')
             val winFeeds = p.filter {
@@ -784,5 +784,168 @@ object LiveTracker {
             if (at.toInstant().toEpochMilli() < minute(now)) at = at.plusDays(1)
             at.toInstant().toEpochMilli()
         }.minOrNull()
+    }
+    // ── Лента дня: факт слева, прогноз справа (v1.18) ──
+
+    /** Сегмент ленты. relStart/relEnd — минуты от подъёма. isFact — записано, иначе план. */
+    data class TlSeg(
+        val relStart: Int,
+        val relEnd: Int,
+        val isSleep: Boolean,
+        val isFact: Boolean,
+        val label: String,
+    ) {
+        val dur: Int get() = relEnd - relStart
+    }
+
+    data class DayTimelineModel(
+        val segments: List<TlSeg>,
+        /** Минуты от подъёма до конца шкалы. */
+        val endRel: Int,
+        val markerFrac: Float,
+        /** Индекс живого сегмента (содержит «сейчас»); −1 если шкала закончилась. */
+        val liveIndex: Int,
+    )
+
+    /**
+     * Лента дня: записанные отрезки (факт) + прогноз будущих (§UX-запрос v1.18).
+     * Шкала — минуты от фактического подъёма (state.dayStart) до конца последнего
+     * прогноза. Прошедшие ориентиры кусков плана отбрасываются — факт первичен.
+     * Пробелы между фактами — бодрствование. Ночные пробуждения — бодрствование.
+     */
+        /** Часы:минуты для epoch-времени в заданной зоне. */
+    private fun clockEpoch(time: Long, zone: java.time.ZoneId): String =
+        java.time.Instant.ofEpochMilli(time).atZone(zone)
+            .format(java.time.format.DateTimeFormatter.ofPattern("HH:mm"))
+
+fun dayTimeline(
+        intervals: List<History.Interval>,
+        state: State,
+        now: Long,
+        forecasts: List<Forecast>,
+    ): DayTimelineModel? {
+        val anchor = state.dayStart
+        if (anchor <= 0L) return null
+        val rel = { t: Long -> ((t - anchor) / MINUTE).toInt() }
+        val nowRel = rel(now).coerceAtLeast(0)
+
+        val raw = mutableListOf<TlSeg>()
+        val mine = intervals.filter { it.day == anchor }.sortedBy { it.start }
+        for (iv in mine) {
+            val st = rel(iv.start).coerceAtLeast(0)
+            val en = rel(iv.end)
+            if (en <= st) continue
+            when (iv.kind) {
+                History.Kind.NAP -> raw.add(TlSeg(st, en, true, true, "Сон"))
+                History.Kind.NIGHT_WAKE -> raw.add(TlSeg(st, en, false, true, "Ночное бодрствование"))
+                History.Kind.NIGHT -> {}
+            }
+        }
+        // Живой отрезок (текущая фаза)
+        if (state.phase != Phase.READY) {
+            val st = rel(state.since).coerceAtLeast(0)
+            val en = rel(now)
+            if (en > st) {
+                val isSleep = state.phase == Phase.NAP || state.phase == Phase.NIGHT
+                raw.add(TlSeg(st, en, isSleep, true, if (isSleep) "Спит сейчас" else "Бодрствует сейчас"))
+            }
+        }
+        // Будущее по прогнозу: пары «событие → следующее событие»
+        val future = forecasts.filter { it.at >= minute(now) }.sortedBy { it.at }
+        var prevAt = -1L
+        var prevTitle = ""
+        for (f in future) {
+            if (prevAt >= 0) {
+                val st = rel(prevAt).coerceAtLeast(nowRel)
+                val en = rel(f.at)
+                if (en > st) {
+                    val isSleep = prevTitle.startsWith("Сон") || prevTitle.startsWith("Ночной")
+                    raw.add(TlSeg(st, en, isSleep, false, if (isSleep) prevTitle else "Бодрствование"))
+                }
+            }
+            prevAt = f.at; prevTitle = f.title
+        }
+
+        // Сортировка, устранение пересечений (факт приоритетен), дыры → бодрствование
+        raw.sortBy { it.relStart }
+        val segments = mutableListOf<TlSeg>()
+        var cursor = 0
+        for (r in raw) {
+            val st = maxOf(r.relStart, cursor)
+            val en = maxOf(r.relEnd, st)
+            if (en > st) segments.add(TlSeg(st, en, r.isSleep, r.isFact, r.label))
+            cursor = maxOf(cursor, en)
+        }
+        val endRel = maxOf(cursor, nowRel)
+        val filled = mutableListOf<TlSeg>()
+        var fill = 0
+        for (s in segments) {
+            if (s.relStart > fill) filled.add(TlSeg(fill, s.relStart, false, true, "Бодрствование"))
+            filled.add(s); fill = s.relEnd
+        }
+        if (fill < endRel) filled.add(TlSeg(fill, endRel, false, false, "План"))
+
+        // Живой сегмент — тот, что содержит «сейчас»
+        var liveIndex = -1
+        filled.forEachIndexed { i, s -> if (nowRel >= s.relStart && nowRel < s.relEnd) liveIndex = i }
+
+        return DayTimelineModel(
+            segments = filled,
+            endRel = endRel,
+            markerFrac = if (endRel <= 0) 0f else nowRel.toFloat() / endRel,
+            liveIndex = liveIndex,
+        )
+    }
+
+    /** Полный экспорт дня: подъём, отрезки с временами и длительностями, ночь. */
+    fun exportDay(
+        intervals: List<History.Interval>,
+        state: State,
+        now: Long,
+        childName: String,
+        zone: java.time.ZoneId,
+    ): String {
+        val sb = StringBuilder()
+        val day = state.dayStart
+        val dateText = java.time.Instant.ofEpochMilli(day).atZone(zone).toLocalDate()
+            .format(java.time.format.DateTimeFormatter.ofPattern("d MMMM", java.util.Locale("ru")))
+        sb.append(childName).append(" · ").append(dateText).append('\n')
+        sb.append("Подъём ").append(clockEpoch(day, zone)).append('\n')
+        val mine = intervals.filter { it.day == day }.sortedBy { it.start }
+        var cursor = day
+        var napN = 0
+        for (iv in mine) {
+            if (iv.start > cursor) {
+                sb.append("⏱ Бодрствование — ").append(clockEpoch(cursor, zone)).append("–")
+                    .append(clockEpoch(iv.start, zone)).append(" (")
+                    .append(SleepEngine.fmtDurHuman(((iv.start - cursor) / LiveTracker.MINUTE).toInt())).append(")\n")
+            }
+            when (iv.kind) {
+                History.Kind.NAP -> { napN++; sb.append("😴 Сон ").append(napN).append(" — ") }
+                History.Kind.NIGHT_WAKE -> sb.append("⏱ Ночное бодрствование — ")
+                History.Kind.NIGHT -> sb.append("🌙 Ночь — ")
+            }
+            sb.append(clockEpoch(iv.start, zone)).append("–").append(clockEpoch(iv.end, zone))
+                .append(" (").append(SleepEngine.fmtDurHuman(iv.minutes)).append(")\n")
+            cursor = iv.end
+        }
+        when (state.phase) {
+            Phase.AWAKE -> sb.append("⏱ Бодрствует с ").append(clockEpoch(state.since, zone)).append(" — идёт\n")
+            Phase.NAP -> sb.append("😴 Спит с ").append(clockEpoch(state.since, zone)).append(" — идёт\n")
+            Phase.NIGHT -> sb.append("🌙 Ночной сон с ").append(clockEpoch(state.nightStart, zone)).append(" — идёт\n")
+            Phase.NIGHT_AWAKE -> sb.append("⏱ Проснулся ночью в ").append(clockEpoch(state.since, zone)).append(" — идёт\n")
+            Phase.READY -> {}
+        }
+        val lastNight = intervals.filter { it.kind == History.Kind.NIGHT }.maxByOrNull { it.end }
+        if (lastNight != null) {
+            sb.append("🌙 Прошлой ночью — ").append(clockEpoch(lastNight.start, zone)).append("–")
+                .append(clockEpoch(lastNight.end, zone)).append(" (").append(SleepEngine.fmtDurHuman(lastNight.minutes)).append(")\n")
+        }
+        val t = History.totals(intervals, state, now)
+        sb.append("⏱ Бодрствование днём: ").append(SleepEngine.fmtDurHuman(t.dayAwakeMin ?: 0)).append('\n')
+        sb.append("😴 Сон днём: ").append(SleepEngine.fmtDurHuman(t.daySleepMin)).append('\n')
+        if (lastNight != null) sb.append("😴 За сутки (день + прошлая ночь): ")
+            .append(SleepEngine.fmtDurHuman(t.daySleepMin + lastNight.minutes)).append('\n')
+        return sb.toString().trimEnd()
     }
 }
