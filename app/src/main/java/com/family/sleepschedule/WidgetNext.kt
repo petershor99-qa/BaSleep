@@ -44,6 +44,18 @@ class WidgetNext : AppWidgetProvider() {
             setTextViewText(R.id.widget_title, "Режим сна")
             setTextViewText(R.id.widget_main, main)
             setTextViewText(R.id.widget_sub, sub)
+            // Цвет фазы: сон — фиолетовый, бодрствование — синий
+            val phaseColor = when (state.phase) {
+                LiveTracker.Phase.NAP, LiveTracker.Phase.NIGHT, LiveTracker.Phase.NIGHT_AWAKE -> 0xFFC9B8FF.toInt()
+                LiveTracker.Phase.AWAKE -> 0xFF9BB8FF.toInt()
+                LiveTracker.Phase.READY -> 0xFF98A1B6.toInt()
+            }
+            setTextColor(R.id.widget_main, phaseColor)
+            // Прогресс текущего этапа по ближайшему прогнозу
+            val frac = if (next != null && next.at > state.since) {
+                ((System.currentTimeMillis() - state.since).toFloat() / (next.at - state.since)).coerceIn(0f, 1f)
+            } else 0f
+            setProgressBar(R.id.widget_progress, 1000, (frac * 1000).toInt(), false)
         }
         val open = PendingIntent.getActivity(
             context,
