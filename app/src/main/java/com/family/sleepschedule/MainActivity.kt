@@ -45,7 +45,9 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
@@ -55,6 +57,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -166,7 +170,15 @@ private val Tabular = TextStyle(fontFeatureSettings = "tnum")
 private fun clock(time: Long): String = java.time.Instant.ofEpochMilli(time)
     .atZone(java.time.ZoneId.systemDefault()).format(java.time.format.DateTimeFormatter.ofPattern("HH:mm"))
 
-@OptIn(ExperimentalLayoutApi::class)
+/** Снимок панели записи: действие, заголовок и время открытия зафиксированы
+ *  один раз — смена минуты/фазы не меняет уже открытую панель (§3.8). */
+private data class RecordSheet(
+    val action: (LiveTracker.State, Long) -> LiveTracker.State,
+    val label: String,
+    val openedAt: Long,
+)
+
+@OptIn(ExperimentalLayoutApi::class, androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 fun App(prefs: SharedPreferences, version: String) {
     var session by remember { mutableStateOf(Prefs.loadLive(prefs)) }
@@ -181,7 +193,6 @@ fun App(prefs: SharedPreferences, version: String) {
     var birthDate by remember { mutableStateOf(prefs.getLong("birthDate", 0L).takeIf { it > 0L }) }
     var settings by rememberSaveable { mutableStateOf(false) }
     var editor by rememberSaveable { mutableStateOf(false) }
-    var manualEntry by rememberSaveable { mutableStateOf(false) }
     var historyOpen by rememberSaveable { mutableStateOf(false) }
     var planOpen by rememberSaveable { mutableStateOf(false) }
     var dim by rememberSaveable { mutableStateOf(false) }
@@ -189,6 +200,7 @@ fun App(prefs: SharedPreferences, version: String) {
     var error by remember { mutableStateOf<String?>(null) }
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var lastTap by remember { mutableLongStateOf(0L) }
+    var sheet by remember { mutableStateOf<RecordSheet?>(null) }
     val context = LocalContext.current
     val focus = LocalFocusManager.current
     val owner = LocalLifecycleOwner.current
@@ -206,10 +218,9 @@ fun App(prefs: SharedPreferences, version: String) {
             delay(((60 - sec) * 1000L + 50L).coerceAtLeast(200L))
         }
     }
-    BackHandler(settings || dim || editor || planOpen || historyOpen || manualEntry) {
+    BackHandler(settings || dim || editor || planOpen || historyOpen) {
         when {
             editor -> editor = false
-            manualEntry -> manualEntry = false
             settings -> settings = false
             historyOpen -> historyOpen = false
             dim -> dim = false
@@ -231,7 +242,7 @@ fun App(prefs: SharedPreferences, version: String) {
     fun store(next: Prefs.Session, newHistory: List<History.Interval>, label: String) {
         if (Prefs.saveLive(prefs, next) && Prefs.saveHistory(prefs, newHistory)) {
             session = next; history = newHistory; message = label; error = null
-            editor = false; manualEntry = false; now = System.currentTimeMillis()
+            editor = false; sheet = null; now = System.currentTimeMillis()
             focus.clearFocus()
             updateWidget()
         } else error = "Не удалось сохранить. Попробуй ещё раз."
@@ -239,10 +250,12 @@ fun App(prefs: SharedPreferences, version: String) {
     /**
      * Записать действие. [at] — null (время телефона) или выбранное вручную
      * время. Возвращает текст ошибки (для редактора времени) или null.
+     * Защита от двойного тапа честная: вместо молчаливого «успеха» возвращается
+     * сообщение об ошибке — панель остаётся открытой.
      */
     fun act(change: (LiveTracker.State, Long) -> LiveTracker.State, at: Long? = null): String? {
         val tap = android.os.SystemClock.elapsedRealtime()
-        if (tap - lastTap < 900) return null
+        if (tap - lastTap < 900) return "Слишком быстро — запись не произведена"
         lastTap = tap
         val time = at ?: System.currentTimeMillis()
         return try {
@@ -273,7 +286,7 @@ fun App(prefs: SharedPreferences, version: String) {
     val nightAvailable = localHour >= 21 || localHour < 6
     val nightSleepNow = state.phase == LiveTracker.Phase.AWAKE && nightAvailable
     // Возраст по дате рождения: «3 мес 22 дн» или null, если дата не задана
-    val computedAge = remember(birthDate, now) { childAgeText(birthDate) }
+    val computedAge = remember(birthDate, now) { SleepEngine.childAgeText(birthDate, java.time.LocalDate.now()) }
     val ageMismatch = remember(computedAge, age) {
         computedAge?.let { text -> SleepEngine.AGES.firstOrNull { text.startsWith("${it.months} мес") }?.months != age.months }
             ?: false
@@ -355,7 +368,7 @@ fun App(prefs: SharedPreferences, version: String) {
                             singleLine = true,
                         )
                         FactPill("Сохранить", {
-                            val parsed = parseBirthDate(birthDraft)
+                            val parsed = SleepEngine.parseBirthDate(birthDraft, java.time.LocalDate.now())
                             if (parsed != null) {
                                 birthDate = parsed
                                 prefs.edit().putLong("birthDate", parsed).apply()
@@ -446,10 +459,6 @@ fun App(prefs: SharedPreferences, version: String) {
                         1f, 1.05f,
                         infiniteRepeatable(tween(2200), RepeatMode.Reverse), label = "breathScale",
                     )
-                    val markerPulse by breathing.animateFloat(
-                        1f, 0.35f,
-                        infiniteRepeatable(tween(1500), RepeatMode.Reverse), label = "markerPulse",
-                    )
                     Column(
                         Modifier
                             .fillMaxWidth()
@@ -482,11 +491,11 @@ fun App(prefs: SharedPreferences, version: String) {
                                 color = Subtitle, fontSize = 14.sp,
                                 style = Tabular,
                             )
-                            phaseHint(state, age, forecasts.firstOrNull(), now)?.let { hint ->
+                            SleepEngine.phaseHint(state, age, forecasts.firstOrNull(), now)?.let { hint ->
                                 Spacer(Modifier.height(2.dp))
-                                Text(hint.text, color = if (hint.over) Amber else Subtitle,
+                                Text(hint.text, color = if (hint.over || hint.near) Amber else Subtitle,
                                     fontSize = 14.sp, textAlign = TextAlign.Center, style = Tabular)
-                                NormBar(hint.fraction, if (hint.over) Amber else accent, Modifier.width(220.dp))
+                                NormBar(hint.fraction, if (hint.over || hint.near) Amber else accent, Modifier.width(220.dp))
                             }
                         } else Text("Нажми — время подставится само, перед записью можно поправить", fontSize = 14.sp, color = Subtitle, textAlign = TextAlign.Center)
                     }
@@ -543,14 +552,16 @@ fun App(prefs: SharedPreferences, version: String) {
                     Pressable(RoundedCornerShape(24.dp), accent, Modifier
                             .fillMaxWidth()
                             .heightIn(min = 76.dp)
-                            .shadow(16.dp, RoundedCornerShape(24.dp), ambientColor = accent, spotColor = accent),
+                            .shadow(6.dp, RoundedCornerShape(24.dp), ambientColor = accent, spotColor = accent),
                         containerBrush = btnBrush,
                         a11y = when {
                             startDayNow -> "Начать день — записать пробуждение"
                             nightSleepNow -> "Ночной сон — записать уход в ночь"
                             else -> "$action — открыть подтверждение с текущим временем"
                         },
-                        onClick = { manualEntry = true }) {
+                        onClick = {
+                            sheet = RecordSheet(mainAction, action, now)
+                        }) {
                         Text(action, fontSize = 24.sp, color = DarkScheme.onPrimary, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(18.dp))
                     }
                     if (state.phase != LiveTracker.Phase.READY) {
@@ -578,16 +589,31 @@ fun App(prefs: SharedPreferences, version: String) {
                             store(Prefs.Session(next, state), history, "Время исправлено: ${clock(at)}"); null
                         } catch (e: IllegalArgumentException) { e.message ?: "Проверь время" }
                     }
-                    if (manualEntry) ClockEditor(
-                        java.time.Instant.ofEpochMilli(now).atZone(java.time.ZoneId.systemDefault()).hour,
-                        java.time.Instant.ofEpochMilli(now).atZone(java.time.ZoneId.systemDefault()).minute,
-                        title = "$action — время уже подставлено",
-                        primaryLabel = "Записать",
-                        onCancel = { manualEntry = false }) { h, m ->
-                        try {
-                            val at = LiveTracker.clockTime(h, m, System.currentTimeMillis(), java.time.ZoneId.systemDefault())
-                            act(mainAction, at)
-                        } catch (e: IllegalArgumentException) { e.message ?: "Проверь время" }
+                    sheet?.let { snap ->
+                        ModalBottomSheet(
+                            onDismissRequest = { sheet = null },
+                            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+                            containerColor = DarkScheme.surface,
+                        ) {
+                            Column(
+                                Modifier.fillMaxWidth().imePadding().navigationBarsPadding().padding(horizontal = 16.dp),
+                                verticalArrangement = Arrangement.spacedBy(10.dp),
+                            ) {
+                                ClockEditor(
+                                    java.time.Instant.ofEpochMilli(snap.openedAt).atZone(java.time.ZoneId.systemDefault()).hour,
+                                    java.time.Instant.ofEpochMilli(snap.openedAt).atZone(java.time.ZoneId.systemDefault()).minute,
+                                    title = "${snap.label} — время уже подставлено",
+                                    primaryLabel = "Записать",
+                                    onCancel = { sheet = null }) { h, m ->
+                                    try {
+                                        val at = LiveTracker.clockTime(h, m, System.currentTimeMillis(), java.time.ZoneId.systemDefault())
+                                        val err = act(snap.action, at)
+                                        if (err == null) sheet = null
+                                        err
+                                    } catch (e: IllegalArgumentException) { e.message ?: "Проверь время" }
+                                }
+                            }
+                        }
                     }
                     if (night && state.phase == LiveTracker.Phase.NIGHT_AWAKE) {
                         FactPill("Начать день", { act(LiveTracker::startDay) }, Modifier.fillMaxWidth())
@@ -598,33 +624,26 @@ fun App(prefs: SharedPreferences, version: String) {
                             TextButton(onClick = { undo() }) { Text("Отменить") }
                         }
                     }
-                    // ── Карточка дня: план-полоса, остатки, факт, дальнейший план ──
+                    // ── Карточка «День»: план-полоса, остатки, факт, дальнейший план ──
                     if (state.phase != LiveTracker.Phase.READY) {
                         val zone = java.time.ZoneId.systemDefault()
-                        val nowZ = java.time.Instant.ofEpochMilli(now).atZone(zone)
-                        val nowTod = nowZ.hour * 60 + nowZ.minute
-                        val wakeTod = ((state.dayStart % 86_400_000L) / 60_000L).toInt()
-                        val base = remember(age, plan, wakeTod) { SleepEngine.build(age, plan, wakeTod) }
-                        val dayLen = base.bedtime - base.wake
-                        val nowMin = if (nowTod < wakeTod) dayLen else (nowTod - wakeTod).coerceAtMost(dayLen)
-                        val frac = if (dayLen <= 0) 0f else nowMin.toFloat() / dayLen
-
-                        data class Seg(val dur: Int, val isNap: Boolean, val label: String, val start: Int, val end: Int)
-                        val segments = buildList {
-                            var cursor = base.wake
-                            for (i in base.naps.indices) {
-                                add(Seg(base.windows[i].effective, false, "Бодрствование ${i + 1}", cursor, cursor + base.windows[i].effective))
-                                cursor += base.windows[i].effective
-                                add(Seg(base.naps[i].duration, true, "Сон ${i + 1}", cursor, cursor + base.naps[i].duration))
-                                cursor += base.naps[i].duration
-                            }
-                            add(Seg(base.windows.last().effective, false, "В ночь", cursor, cursor + base.windows.last().effective))
+                        val bar = SleepEngine.dayBar(age, plan, regress, state.dayStart, now, zone)
+                        // Ночью: идущая сейчас ночь, иначе последняя завершённая (или «—»)
+                        val liveNight = state.phase == LiveTracker.Phase.NIGHT
+                        val nightMinutes = if (liveNight) SleepEngine.nightSleepMinutes(history, state, now)
+                            else History.days(history).firstOrNull()?.night?.minutes
+                        val nightLabel = when {
+                            liveNight -> "Ночью сейчас"
+                            nightMinutes != null -> "Прошлая ночь"
+                            else -> "Ночью"
                         }
+                        val nightText = nightMinutes?.let { SleepEngine.fmtDurHuman(it) } ?: "—"
 
                         Column(
                             Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(DarkScheme.surface).padding(14.dp),
                             verticalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
+                            Text("План дня", fontSize = 12.sp, color = Subtitle)
                             forecasts.firstOrNull()?.let { next ->
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Column(Modifier.weight(1f)) {
@@ -639,86 +658,102 @@ fun App(prefs: SharedPreferences, version: String) {
                                 )
                             }
 
-                            // Полоса дня: окна тёмные, сны подсвечены, бегунок «сейчас»
-                            BoxWithConstraints(
+                            // Полоса дня: тап — правка текущего события; зона нажатия от 48 dp
+                            Box(
                                 Modifier
                                     .fillMaxWidth()
-                                    .height(16.dp)
-                                    .clip(RoundedCornerShape(50))
-                                    .background(MutedBg)
+                                    .heightIn(min = 48.dp)
                                     .clickable(onClickLabel = "Исправить время текущего события") { editor = true },
+                                contentAlignment = Alignment.Center,
                             ) {
-                                Row(Modifier.fillMaxSize()) {
-                                    var cursor = 0
-                                    segments.forEach { seg ->
-                                        val isNow = nowMin > cursor && nowMin <= seg.end
-                                        BoxWithConstraints(
-                                            Modifier
-                                                .weight(seg.dur.toFloat().coerceAtLeast(1f))
-                                                .fillMaxSize()
-                                                .background(
-                                                    when {
-                                                        isNow && seg.isNap -> NightTint
-                                                        seg.isNap -> NightTint.copy(alpha = 0.40f)
-                                                        else -> DarkScheme.surfaceVariant
-                                                    }
-                                                )
-                                        ) {
-                                            if (seg.isNap && maxWidth >= 34.dp) {
-                                                Text(
-                                                    "${seg.label.takeLast(1)}",
-                                                    fontSize = 9.sp, color = Color.White.copy(alpha = 0.9f),
-                                                    modifier = Modifier.align(Alignment.Center),
-                                                )
+                                BoxWithConstraints(
+                                    Modifier
+                                        .fillMaxWidth()
+                                        .height(16.dp)
+                                        .clip(RoundedCornerShape(50))
+                                        .background(MutedBg)
+                                        .semantics {
+                                            contentDescription = "План дня: фиолетовое — сон, тёмное — бодрствование. " +
+                                                "Сейчас по плану: " +
+                                                (bar.currentIndex.takeIf { it >= 0 }?.let { bar.segments[it].label } ?: "после отбоя") +
+                                                ". Нажатие — исправить время текущего события."
+                                        },
+                                ) {
+                                    val barMaxWidth = maxWidth
+                                    Row(Modifier.fillMaxSize()) {
+                                        bar.segments.forEachIndexed { i, seg ->
+                                            val isCurrent = i == bar.currentIndex
+                                            Box(
+                                                Modifier
+                                                    .weight(seg.dur.toFloat().coerceAtLeast(1f))
+                                                    .fillMaxSize()
+                                                    .background(
+                                                        when {
+                                                            isCurrent && seg.isNap -> NightTint
+                                                            isCurrent -> lerp(DarkScheme.surfaceVariant, Color.White, 0.12f)
+                                                            seg.isNap -> NightTint.copy(alpha = 0.40f)
+                                                            else -> DarkScheme.surfaceVariant
+                                                        }
+                                                    )
+                                                    .border(
+                                                        1.dp,
+                                                        if (isCurrent) Color.White.copy(alpha = 0.85f) else Color.Transparent,
+                                                        RoundedCornerShape(4.dp),
+                                                    ),
+                                                contentAlignment = Alignment.Center,
+                                            ) {
+                                                if (seg.isNap && barMaxWidth * (seg.dur.toFloat() / bar.dayLen) >= 34.dp) {
+                                                    Text(
+                                                        seg.label.takeLast(1),
+                                                        fontSize = 9.sp, color = Color.White.copy(alpha = 0.9f),
+                                                    )
+                                                }
                                             }
                                         }
-                                        cursor += seg.dur
                                     }
-                                }
-                                Row(Modifier.fillMaxSize()) {
-                                    val left = frac.coerceIn(0.002f, 0.998f)
-                                    Spacer(Modifier.weight(left))
-                                    Box(
-                                        Modifier
-                                            .width(3.dp)
-                                            .fillMaxSize()
-                                            .background(Color.White.copy(alpha = markerPulse))
-                                    )
-                                    Spacer(Modifier.weight(1f - left))
+                                    Row(Modifier.fillMaxSize()) {
+                                        val left = bar.markerFrac.coerceIn(0.002f, 0.998f)
+                                        Spacer(Modifier.weight(left))
+                                        Box(Modifier.width(3.dp).fillMaxSize().background(Color.White.copy(alpha = 0.85f)))
+                                        Spacer(Modifier.weight(1f - left))
+                                    }
                                 }
                             }
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                Text(SleepEngine.fmtClock(base.wake), fontSize = 11.sp, color = Subtitle, style = Tabular)
+                                Text(SleepEngine.fmtClock(bar.wakeTod), fontSize = 11.sp, color = Subtitle, style = Tabular)
                                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                    Text("🌙 сон", fontSize = 11.sp, color = NightTint)
-                                    Text("⏱ бодрствование", fontSize = 11.sp, color = Subtitle)
+                                    Text("Фиолетовый — сон", fontSize = 11.sp, color = NightTint)
+                                    Text("Тёмный — бодрствование", fontSize = 11.sp, color = Subtitle)
                                 }
-                                Text(SleepEngine.fmtClock(base.bedtime % 1440), fontSize = 11.sp, color = Subtitle, style = Tabular)
+                                Text(SleepEngine.fmtClock(bar.bedtimeTod), fontSize = 11.sp, color = Subtitle, style = Tabular)
+                            }
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                                Text("▲ сейчас", fontSize = 11.sp, color = Subtitle)
                             }
 
-                            // Остатки по плану человеческим языком
-                            val elapsedSleep = segments.filter { it.isNap }
-                                .sumOf { seg -> (minOf(seg.end, base.wake + nowMin) - maxOf(seg.start, base.wake)).coerceAtLeast(0) }
-                            val remainingSleep = (base.daySleep - elapsedSleep).coerceAtLeast(0)
-                            val untilBed = (base.bedtime - (base.wake + nowMin)).coerceAtLeast(0)
-                            if (night || untilBed == 0) {
-                                val untilWake = if (nowTod >= ((base.bedtime % 1440) + 1440) % 1440)
-                                    (1440 - nowTod) + base.wake else (base.wake - nowTod).coerceAtLeast(0)
+                            // Остатки по плану (из модели полосы)
+                            if (night) {
+                                val next = forecasts.firstOrNull()
+                                val right = when {
+                                    next == null -> nightText
+                                    next.at >= now -> "до подъёма ~${SleepEngine.fmtDurHuman(((next.at - now) / LiveTracker.MINUTE).toInt())}"
+                                    else -> "ориентир подъёма прошёл"
+                                }
                                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                                     Text("🌙 Ночь идёт", fontSize = 13.sp, color = NightTint)
-                                    Text("до подъёма ~${SleepEngine.fmtDurHuman(untilWake)}", fontSize = 13.sp, color = NightTint, style = Tabular)
+                                    Text(right, fontSize = 13.sp, color = NightTint, style = Tabular)
                                 }
                             } else {
                                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                                     Text("😴 Спать осталось", fontSize = 13.sp, color = Subtitle)
                                     Text(
-                                        "~${SleepEngine.fmtDurHuman(remainingSleep)} из ${SleepEngine.fmtDurHuman(base.daySleep)}",
+                                        "~${SleepEngine.fmtDurHuman(bar.remainingSleepMin)} из ${SleepEngine.fmtDurHuman(bar.segments.filter { it.isNap }.sumOf { it.dur })}",
                                         fontSize = 13.sp, color = NightTint, style = Tabular,
                                     )
                                 }
                                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                                     Text("⏱ Бодрствовать", fontSize = 13.sp, color = Subtitle)
-                                    Text("до отбоя ~${SleepEngine.fmtDurHuman(untilBed)}", fontSize = 13.sp, color = DarkScheme.onSurfaceVariant, style = Tabular)
+                                    Text("до отбоя ~${SleepEngine.fmtDurHuman(bar.untilBedMin)}", fontSize = 13.sp, color = DarkScheme.onSurfaceVariant, style = Tabular)
                                 }
                             }
                             LiveTracker.nextFeed(feeds, now, zone)?.let {
@@ -728,19 +763,25 @@ fun App(prefs: SharedPreferences, version: String) {
                                 }
                             }
 
-                            // Факт дня — плитками
-                            if (state.dayStart > 0L) {
-                                val t = History.totals(history, state, now)
-                                // Ночью: идущая сейчас ночь, иначе последняя завершённая
-                                val liveNight = state.phase == LiveTracker.Phase.NIGHT
-                                val nightVal = if (liveNight) t.nightSleepMin
-                                    else history.filter { it.kind == History.Kind.NIGHT }.maxByOrNull { it.end }?.minutes ?: 0
-                                val nightLabel = if (liveNight) "Ночью сейчас" else "Прошлой ночью"
-                                Spacer(Modifier.height(2.dp))
+                            // Факт дня — сворачиваемый блок
+                            var factsOpen by rememberSaveable { mutableStateOf(false) }
+                            val t = History.totals(history, state, now)
+                            Row(
+                                Modifier.fillMaxWidth().clickable { factsOpen = !factsOpen }.padding(vertical = 4.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                            ) {
+                                Text("Факт", fontSize = 12.sp, color = Subtitle)
+                                Text(
+                                    "днём ${SleepEngine.fmtDurHuman(t.daySleepMin)} · всего ${SleepEngine.fmtDurHuman(t.daySleepMin + (nightMinutes ?: 0))}",
+                                    fontSize = 12.sp, color = Subtitle, style = Tabular,
+                                )
+                                Text(if (factsOpen) "▾" else "▸", fontSize = 12.sp, color = Subtitle)
+                            }
+                            if (factsOpen) {
                                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    FactTile("Дневной сон", t.daySleepMin, age.dayNormShort, age.dayMax - 15, Modifier.weight(1f))
-                                    FactTile(nightLabel, nightVal, age.nightNormShort, age.nightMax - 15, Modifier.weight(1f))
-                                    FactTile("За сутки", t.daySleepMin + nightVal, age.totalNormShort, age.totalMax - 15, Modifier.weight(1f))
+                                    FactTile("Днём сегодня", SleepEngine.fmtDurHuman(t.daySleepMin), age.dayNormShort, t.daySleepMin >= age.dayMax - 15, Modifier.weight(1f))
+                                    FactTile(nightLabel, nightText, age.nightNormShort, (nightMinutes ?: 0) >= age.nightMax - 15, Modifier.weight(1f))
+                                    FactTile("Всего за сутки", SleepEngine.fmtDurHuman(t.daySleepMin + (nightMinutes ?: 0)), age.totalNormShort, (t.daySleepMin + (nightMinutes ?: 0)) >= age.totalMax - 15, Modifier.weight(1f))
                                 }
                                 t.dayAwakeMin?.let {
                                     Text("Бодрствование днём ${SleepEngine.fmtDurHuman(it)}", fontSize = 12.sp, color = Subtitle)
@@ -765,29 +806,6 @@ fun App(prefs: SharedPreferences, version: String) {
         }
     }
 }
-
-/** Возраст текстом по дате рождения: «3 мес 22 дн», «110 дн» для первого месяца. */
-private fun childAgeText(birth: Long?): String? {
-    if (birth == null || birth <= 0L) return null
-    val zone = java.time.ZoneId.systemDefault()
-    val b = java.time.Instant.ofEpochMilli(birth).atZone(zone).toLocalDate()
-    val today = java.time.LocalDate.now(zone)
-    val totalDays = java.time.temporal.ChronoUnit.DAYS.between(b, today)
-    if (totalDays < 0) return null
-    val months = java.time.temporal.ChronoUnit.MONTHS.between(b, today)
-    val daysRest = totalDays - java.time.temporal.ChronoUnit.DAYS.between(b, b.plusMonths(months))
-    return when {
-        months < 1 -> "$totalDays дн"
-        else -> "$months мес${if (daysRest > 0) " $daysRest дн" else ""}"
-    }
-}
-
-/** Парс даты рождения «ДД.ММ.ГГГГ»; null при ошибке или дате в будущем. */
-private fun parseBirthDate(text: String): Long? = try {
-    val d = java.time.LocalDate.parse(text.trim(), java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy"))
-    if (d.isAfter(java.time.LocalDate.now())) null
-    else d.atStartOfDay(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
-} catch (_: Exception) { null }
 
 private fun phaseTitle(phase: LiveTracker.Phase): String = when (phase) {
     LiveTracker.Phase.READY -> "Начнём день"
@@ -817,48 +835,7 @@ private fun dayLabel(dayStart: Long): String {
     }
 }
 
-/** Подсказка под таймером: норма текущей фазы и сколько осталось. */
-private data class PhaseHint(val text: String, val fraction: Float, val over: Boolean)
-
-private fun phaseHint(
-    state: LiveTracker.State,
-    age: SleepEngine.Age,
-    next: LiveTracker.Forecast?,
-    now: Long,
-): PhaseHint? {
-    val duration = ((now - state.since).coerceAtLeast(0) / LiveTracker.MINUTE).toInt()
-    return when (state.phase) {
-        LiveTracker.Phase.AWAKE -> {
-            val base = "Окно ${SleepEngine.fmtDurHuman(duration)} · норма ${SleepEngine.fmtDur(age.wwMin)}–${SleepEngine.fmtDur(age.wwMax)}"
-            if (next == null) {
-                PhaseHint(base, duration.toFloat() / age.hardMax, duration > age.hardMax)
-            } else {
-                val left = ((next.at - now) / LiveTracker.MINUTE).toInt()
-                val total = ((next.at - state.since).coerceAtLeast(LiveTracker.MINUTE) / LiveTracker.MINUTE).toInt()
-                if (left >= 0) PhaseHint("$base · осталось ~${SleepEngine.fmtDurHuman(left)}",
-                    duration.toFloat() / total, duration > age.hardMax)
-                else PhaseHint("$base · окно вышло на ${SleepEngine.fmtDurHuman(-left)}", 1f, true)
-            }
-        }
-        LiveTracker.Phase.NAP -> {
-            if (next == null) PhaseHint("Спит ${SleepEngine.fmtDurHuman(duration)}", 0f, false)
-            else {
-                val left = ((next.at - now) / LiveTracker.MINUTE).toInt()
-                val total = ((next.at - state.since).coerceAtLeast(LiveTracker.MINUTE) / LiveTracker.MINUTE).toInt()
-                if (left >= 0) PhaseHint(
-                    "Ориентир сна ${SleepEngine.fmtDurHuman(total)} · осталось ~${SleepEngine.fmtDurHuman(left)}",
-                    duration.toFloat() / total, false)
-                else PhaseHint("Спит дольше ориентира на ${SleepEngine.fmtDurHuman(-left)}", 1f, true)
-            }
-        }
-        LiveTracker.Phase.NIGHT ->
-            PhaseHint("Ночь ${SleepEngine.fmtDurHuman(duration)} · ${age.nightNormShort}",
-                duration.toFloat() / age.nightMax, duration > age.nightMax)
-        LiveTracker.Phase.NIGHT_AWAKE ->
-            PhaseHint("Ночное бодрствование ${SleepEngine.fmtDurHuman(duration)}", 0f, false)
-        LiveTracker.Phase.READY -> null
-    }
-}
+/** Подсказка под таймером — перенесена в SleepEngine (чистая, с near-флагом). */
 
 /** Тонкий прогресс-бар под таймером. */
 @Composable
@@ -884,13 +861,7 @@ private fun NormLine(label: String, valueMin: Int, min: Int, max: Int, normShort
 
 /** Плитка факта: значение крупно, под ним подпись и норма. */
 @Composable
-private fun FactTile(label: String, minutes: Int, norm: String, warnAt: Int, modifier: Modifier = Modifier) {
-    // Янтарный у лимита (за 15 мин до максимума) и за ним
-    val color = when {
-        minutes > warnAt + 15 -> Amber
-        minutes >= warnAt -> lerp(DarkScheme.onSurface, Amber, 0.6f)
-        else -> DarkScheme.onSurface
-    }
+private fun FactTile(label: String, value: String, norm: String, warn: Boolean, modifier: Modifier = Modifier) {
     Column(
         modifier
             .clip(RoundedCornerShape(12.dp))
@@ -899,11 +870,11 @@ private fun FactTile(label: String, minutes: Int, norm: String, warnAt: Int, mod
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Text(
-            SleepEngine.fmtDurHuman(minutes), fontSize = 15.sp, fontWeight = FontWeight.Bold,
-            color = color, style = Tabular,
+            value, fontSize = 15.sp, fontWeight = FontWeight.Bold,
+            color = if (warn) Amber else DarkScheme.onSurface, style = Tabular,
         )
         Text(label, fontSize = 11.sp, color = Subtitle, maxLines = 1)
-        Text(norm, fontSize = 9.sp, color = DarkScheme.onSurfaceVariant)
+        Text(norm, fontSize = 11.sp, color = DarkScheme.onSurfaceVariant)
     }
 }
 
@@ -921,24 +892,33 @@ private fun ClockEditor(
     val hFocus = remember { androidx.compose.ui.focus.FocusRequester() }
     val mFocus = remember { androidx.compose.ui.focus.FocusRequester() }
     val keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
+    var m by rememberSaveable(initialHour, initialMinute, stateSaver = androidx.compose.ui.text.input.TextFieldValue.Saver) {
+        mutableStateOf(androidx.compose.ui.text.input.TextFieldValue("%02d".format(initialMinute), androidx.compose.ui.text.TextRange(0, 2)))
+    }
     var h by rememberSaveable(initialHour, initialMinute, stateSaver = androidx.compose.ui.text.input.TextFieldValue.Saver) {
         mutableStateOf(androidx.compose.ui.text.input.TextFieldValue("%02d".format(initialHour), androidx.compose.ui.text.TextRange(0, 2)))
-    }
-    var m by rememberSaveable(initialHour, initialMinute, stateSaver = androidx.compose.ui.text.input.TextFieldValue.Saver) {
-        mutableStateOf(androidx.compose.ui.text.input.TextFieldValue("%02d".format(initialMinute)))
     }
     var error by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(Unit) {
         hFocus.requestFocus()
         keyboard?.show()
     }
-    LaunchedEffect(h.text) { if (h.text.length >= 2) mFocus.requestFocus() }
     Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(DarkScheme.surface).padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         if (title != null) Text(title, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             OutlinedTextField(
                 h,
-                { v -> val d = v.text.filter(Char::isDigit).take(2); h = v.copy(text = d, selection = androidx.compose.ui.text.TextRange(d.length)) },
+                { v ->
+                    val d = v.text.filter(Char::isDigit).take(2)
+                    val wasShort = h.text.length < 2
+                    h = v.copy(text = d, selection = androidx.compose.ui.text.TextRange(d.length))
+                    // Авто-переход на «Минуты» после ввода второй цифры часов (§3.9):
+                    // фокус + всё значение минут выделено — печать заменяет подставленное.
+                    if (d.length == 2 && wasShort) {
+                        mFocus.requestFocus()
+                        m = m.copy(selection = androidx.compose.ui.text.TextRange(0, m.text.length))
+                    }
+                },
                 label = { Text("Часы") },
                 modifier = Modifier.weight(1f).focusRequester(hFocus),
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), singleLine = true)

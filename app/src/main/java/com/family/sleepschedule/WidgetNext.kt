@@ -51,11 +51,8 @@ class WidgetNext : AppWidgetProvider() {
                 LiveTracker.Phase.READY -> 0xFF98A1B6.toInt()
             }
             setTextColor(R.id.widget_main, phaseColor)
-            // Прогресс текущего этапа по ближайшему прогнозу
-            val frac = if (next != null && next.at > state.since) {
-                ((System.currentTimeMillis() - state.since).toFloat() / (next.at - state.since)).coerceIn(0f, 1f)
-            } else 0f
-            setProgressBar(R.id.widget_progress, 1000, (frac * 1000).toInt(), false)
+            // Прогресс текущего этапа по ближайшему прогнозу (чистая функция, §F)
+            setProgressBar(R.id.widget_progress, 1000, SleepEngine.phaseProgress(state, next, System.currentTimeMillis()), false)
         }
         val open = PendingIntent.getActivity(
             context,

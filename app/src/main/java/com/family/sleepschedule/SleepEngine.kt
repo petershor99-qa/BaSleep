@@ -498,6 +498,183 @@ object SleepEngine {
     private fun fmtHours(minutes: Int): String =
         if (minutes % 60 == 0) (minutes / 60).toString()
         else String.format("%.1f", minutes / 60.0).replace('.', ',')
+    // ── Полоса дня: чистая модель главного экрана (§3.1–3.5) ──
+
+    /** Сегмент полосы дня. relStart/relEnd — минуты от подъёма. */
+    data class DaySegment(
+        val relStart: Int,
+        val relEnd: Int,
+        val isNap: Boolean,
+        val label: String,
+    ) {
+        val dur: Int get() = relEnd - relStart
+    }
+
+    data class DayBarModel(
+        val segments: List<DaySegment>,
+        /** Минуты суток подъёма в локальной зоне, напр. 540 для 09:00. */
+        val wakeTod: Int,
+        val bedtimeTod: Int,
+        val dayLen: Int,
+        /** Минуты от подъёма до «сейчас», ограничено днём (0..dayLen). */
+        val nowRel: Int,
+        val markerFrac: Float,
+        /** Индекс текущего сегмента; −1 после отбоя. Ровно один внутри дня. */
+        val currentIndex: Int,
+        val remainingSleepMin: Int,
+        val untilBedMin: Int,
+    )
+
+    /**
+     * Модель полосы дня от фактического подъёма ([dayStart]) до расчётного отбоя.
+     * Все времена — локальная зона [zone] (никакого UTC-остатка от epoch, §3.1).
+     * Полночь: nowTod < wakeTod → +1440, единая относительная шкала (§3.2).
+     * [regress] учитывается: при включённом режиме отбой полосы раньше (§3.5).
+     * Границы сегментов [relStart, relEnd): подъём → первое окно, начало сна → сон,
+     * конец сна → окно, после отбоя currentIndex = −1 (§3.4).
+     */
+    fun dayBar(
+        age: Age,
+        plan: NapPlan,
+        regress: Boolean,
+        dayStart: Long,
+        now: Long,
+        zone: java.time.ZoneId,
+    ): DayBarModel {
+        val base = build(age, plan, todOf(dayStart, zone), Adjustments(), regress)
+        val wakeTod = base.wake
+        val dayLen = base.bedtime - base.wake
+        val nowTod = todOf(now, zone)
+        val rawRel = if (nowTod < wakeTod) nowTod + 1440 - wakeTod else nowTod - wakeTod
+        val nowRel = rawRel.coerceIn(0, dayLen)
+        val segments = buildList {
+            var cursor = 0
+            for (i in base.naps.indices) {
+                val w = base.windows[i].effective
+                add(DaySegment(cursor, cursor + w, false, "Бодрствование ${i + 1}"))
+                cursor += w
+                val n = base.naps[i].duration
+                add(DaySegment(cursor, cursor + n, true, "Сон ${i + 1}"))
+                cursor += n
+            }
+            val lastW = base.windows.last().effective
+            add(DaySegment(cursor, cursor + lastW, false, "В ночь"))
+        }
+        // Ровно один текущий сегмент: [relStart, relEnd); после отбоя — ни одного.
+        var currentIndex = -1
+        segments.forEachIndexed { i, s -> if (nowRel >= s.relStart && nowRel < s.relEnd) currentIndex = i }
+        val elapsedSleep = segments.filter { it.isNap }
+            .sumOf { (minOf(it.relEnd, nowRel) - maxOf(it.relStart, 0)).coerceAtLeast(0) }
+        return DayBarModel(
+            segments = segments,
+            wakeTod = wakeTod,
+            bedtimeTod = base.bedtime,
+            dayLen = dayLen,
+            nowRel = nowRel,
+            markerFrac = if (dayLen <= 0) 0f else nowRel.toFloat() / dayLen,
+            currentIndex = currentIndex,
+            remainingSleepMin = (base.daySleep - elapsedSleep).coerceAtLeast(0),
+            untilBedMin = (dayLen - nowRel).coerceAtLeast(0),
+        )
+    }
+
+    /** Минуты суток для момента времени в заданной зоне (§3.1). */
+    fun todOf(epochMillis: Long, zone: java.time.ZoneId): Int {
+        val z = java.time.Instant.ofEpochMilli(epochMillis).atZone(zone)
+        return z.hour * 60 + z.minute
+    }
+
+    /**
+     * Ночной сон текущей ночи для плитки «Ночью сейчас» (§3.7): от nightStart до
+     * [until] минус зарегистрированные ночные пробуждения (они — не сон).
+     * null — ночи нет (нет nightStart или фаза не ночная).
+     */
+    fun nightSleepMinutes(
+        intervals: List<History.Interval>,
+        state: LiveTracker.State,
+        until: Long,
+    ): Int? {
+        val ns = state.nightStart
+        if (ns <= 0L) return null
+        val untilMin = LiveTracker.minute(until)
+        val startMin = LiveTracker.minute(ns)
+        if (untilMin <= startMin) return 0
+        val wakes = intervals.filter { it.kind == History.Kind.NIGHT_WAKE && it.start >= ns }
+            .sumOf { ((minOf(it.end, untilMin) - it.start).coerceAtLeast(0) / LiveTracker.MINUTE).toInt() }
+        return (((untilMin - startMin) / LiveTracker.MINUTE).toInt()) - wakes
+    }
+
+    /** Прогресс текущего этапа для виджета: 0..1000 (§F). */
+    fun phaseProgress(state: LiveTracker.State, next: LiveTracker.Forecast?, now: Long): Int {
+        if (next == null || next.at <= state.since) return 0
+        return (((now - state.since).toFloat() / (next.at - state.since)).coerceIn(0f, 1f) * 1000).toInt()
+    }
+
+    /** Возраст текстом по дате рождения: «3 мес 22 дн», «110 дн» в первый месяц. */
+    fun childAgeText(birth: Long?, today: java.time.LocalDate): String? {
+        if (birth == null || birth <= 0L) return null
+        val b = java.time.Instant.ofEpochMilli(birth).atZone(java.time.ZoneId.systemDefault()).toLocalDate()
+        val totalDays = java.time.temporal.ChronoUnit.DAYS.between(b, today)
+        if (totalDays < 0) return null
+        val months = java.time.temporal.ChronoUnit.MONTHS.between(b, today)
+        val daysRest = totalDays - java.time.temporal.ChronoUnit.DAYS.between(b, b.plusMonths(months))
+        return when {
+            months < 1 -> "$totalDays дн"
+            else -> "$months мес${if (daysRest > 0) " $daysRest дн" else ""}"
+        }
+    }
+
+    /** Парс даты рождения «ДД.ММ.ГГГГ»; null при ошибке или дате в будущем. */
+    fun parseBirthDate(text: String, today: java.time.LocalDate): Long? = try {
+        val d = java.time.LocalDate.parse(text.trim(), java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy"))
+        if (d.isAfter(today)) null
+        else d.atStartOfDay(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
+    } catch (_: Exception) { null }
+
+    /** Подсказка под таймером: норма фазы, остаток, over/near. */
+    data class PhaseHint(val text: String, val fraction: Float, val over: Boolean, val near: Boolean)
+
+    fun phaseHint(
+        state: LiveTracker.State,
+        age: Age,
+        next: LiveTracker.Forecast?,
+        now: Long,
+    ): PhaseHint? {
+        val duration = ((now - state.since).coerceAtLeast(0) / LiveTracker.MINUTE).toInt()
+        return when (state.phase) {
+            LiveTracker.Phase.AWAKE -> {
+                val base = "Окно ${fmtDurHuman(duration)} · норма ${fmtDur(age.wwMin)}–${fmtDur(age.wwMax)}"
+                if (next == null) {
+                    PhaseHint(base, duration.toFloat() / age.hardMax, duration > age.hardMax, age.hardMax - duration in 1..10)
+                } else {
+                    val left = ((next.at - now) / LiveTracker.MINUTE).toInt()
+                    val total = ((next.at - state.since).coerceAtLeast(LiveTracker.MINUTE) / LiveTracker.MINUTE).toInt()
+                    if (left >= 0) PhaseHint(
+                        "$base · осталось ~${fmtDurHuman(left)}",
+                        duration.toFloat() / total, duration > age.hardMax, left in 1..10)
+                    else PhaseHint("$base · окно вышло на ${fmtDurHuman(-left)}", 1f, true, false)
+                }
+            }
+            LiveTracker.Phase.NAP -> {
+                if (next == null) PhaseHint("Спит ${fmtDurHuman(duration)}", 0f, false, false)
+                else {
+                    val left = ((next.at - now) / LiveTracker.MINUTE).toInt()
+                    val total = ((next.at - state.since).coerceAtLeast(LiveTracker.MINUTE) / LiveTracker.MINUTE).toInt()
+                    if (left >= 0) PhaseHint(
+                        "Ориентир сна ${fmtDurHuman(total)} · осталось ~${fmtDurHuman(left)}",
+                        duration.toFloat() / total, false, left in 1..10)
+                    else PhaseHint("Спит дольше ориентира на ${fmtDurHuman(-left)}", 1f, true, false)
+                }
+            }
+            LiveTracker.Phase.NIGHT ->
+                PhaseHint("Ночь ${fmtDurHuman(duration)} · ${age.nightNormShort}",
+                    duration.toFloat() / age.nightMax, duration > age.nightMax, false)
+            LiveTracker.Phase.NIGHT_AWAKE ->
+                PhaseHint("Ночное бодрствование ${fmtDurHuman(duration)}", 0f, false, false)
+            LiveTracker.Phase.READY -> null
+        }
+    }
+
 }
 
 
