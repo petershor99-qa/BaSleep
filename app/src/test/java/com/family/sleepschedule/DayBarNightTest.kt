@@ -208,12 +208,14 @@ class DayBarNightTest {
     }
 
     @Test
-    fun `parseBirthDate - валид, мусор, будущее`() {
+    fun `parseBirthParts - валид, мусор, будущее, несуществующая дата`() {
         val today = LocalDate.of(2026, 11, 6)
-        assertNotNull(SleepEngine.parseBirthDate("17.07.2026", today))
-        assertNull(SleepEngine.parseBirthDate("мусор", today))
-        assertNull(SleepEngine.parseBirthDate("17.07.2999", today))
-        assertNull(SleepEngine.parseBirthDate("", today))
+        assertNotNull(SleepEngine.parseBirthParts("17", "7", "2026", today))
+        assertNull(SleepEngine.parseBirthParts("99", "13", "2026", today))    // день/месяц вне диапазона
+        assertNull(SleepEngine.parseBirthParts("30", "2", "2026", today))     // 30 февраля
+        assertNull(SleepEngine.parseBirthParts("17", "7", "2999", today))     // будущее
+        assertNull(SleepEngine.parseBirthParts("", "", "", today))            // пустые
+        assertNull(SleepEngine.parseBirthParts("1", "1", "199", today))       // неполный год
     }
 
     // ── phaseProgress для виджета ──

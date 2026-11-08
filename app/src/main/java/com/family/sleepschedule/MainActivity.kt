@@ -306,6 +306,7 @@ fun App(prefs: SharedPreferences, version: String) {
         labelLarge = TextStyle(fontFamily = Manrope), titleLarge = TextStyle(fontFamily = Manrope))) {
         Surface(Modifier.fillMaxSize(), color = if (dim) Color.Black else DarkScheme.background) {
             Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)
+                .imePadding()
                 .verticalScroll(rememberScrollState()).padding(horizontal = 24.dp, vertical = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -353,29 +354,75 @@ fun App(prefs: SharedPreferences, version: String) {
                         })
                     }
                     Text("Дата рождения (для автоматического возраста)", fontSize = 16.sp)
-                    var birthDraft by remember(birthDate) {
+                    val dayFocus = remember { androidx.compose.ui.focus.FocusRequester() }
+                    val monthFocus = remember { androidx.compose.ui.focus.FocusRequester() }
+                    val yearFocus = remember { androidx.compose.ui.focus.FocusRequester() }
+                    var bdDay by remember(birthDate) {
                         mutableStateOf(birthDate?.let {
                             java.time.Instant.ofEpochMilli(it).atZone(java.time.ZoneId.systemDefault())
-                                .format(java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy"))
+                                .format(java.time.format.DateTimeFormatter.ofPattern("dd"))
+                        } ?: "")
+                    }
+                    var bdMonth by remember(birthDate) {
+                        mutableStateOf(birthDate?.let {
+                            java.time.Instant.ofEpochMilli(it).atZone(java.time.ZoneId.systemDefault())
+                                .format(java.time.format.DateTimeFormatter.ofPattern("MM"))
+                        } ?: "")
+                    }
+                    var bdYear by remember(birthDate) {
+                        mutableStateOf(birthDate?.let {
+                            java.time.Instant.ofEpochMilli(it).atZone(java.time.ZoneId.systemDefault())
+                                .format(java.time.format.DateTimeFormatter.ofPattern("yyyy"))
                         } ?: "")
                     }
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedTextField(
-                            birthDraft,
-                            { birthDraft = it.take(10) },
-                            label = { Text("ДД.ММ.ГГГГ") },
-                            modifier = Modifier.weight(1f),
-                            singleLine = true,
+                            bdDay,
+                            { v ->
+                                bdDay = v.filter(Char::isDigit).take(2)
+                                if (bdDay.length == 2) monthFocus.requestFocus()
+                            },
+                            label = { Text("ДД") },
+                            modifier = Modifier.weight(1f).focusRequester(dayFocus),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), singleLine = true,
                         )
-                        FactPill("Сохранить", {
-                            val parsed = SleepEngine.parseBirthDate(birthDraft, java.time.LocalDate.now())
-                            if (parsed != null) {
-                                birthDate = parsed
-                                prefs.edit().putLong("birthDate", parsed).apply()
-                                updateWidget()
-                            } else error = "Формат: ДД.ММ.ГГГГ, не в будущем"
-                        })
+                        OutlinedTextField(
+                            bdMonth,
+                            { v ->
+                                bdMonth = v.filter(Char::isDigit).take(2)
+                                if (bdMonth.length == 2) yearFocus.requestFocus()
+                            },
+                            label = { Text("ММ") },
+                            modifier = Modifier.weight(1f).focusRequester(monthFocus),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), singleLine = true,
+                        )
+                        OutlinedTextField(
+                            bdYear,
+                            { v -> bdYear = v.filter(Char::isDigit).take(4) },
+                            label = { Text("ГГГГ") },
+                            modifier = Modifier.weight(2f).focusRequester(yearFocus),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), singleLine = true,
+                        )
                     }
+                    FactPill("Сохранить дату рождения", {
+                        when {
+                            bdDay.isEmpty() && bdMonth.isEmpty() && bdYear.isEmpty() -> {
+                                birthDate = null
+                                prefs.edit().remove("birthDate").apply()
+                                error = null
+                                updateWidget()
+                            }
+                            else -> {
+                                val parsed = SleepEngine.parseBirthParts(bdDay, bdMonth, bdYear, java.time.LocalDate.now())
+                                if (parsed != null) {
+                                    birthDate = parsed
+                                    prefs.edit().putLong("birthDate", parsed).apply()
+                                    error = null
+                                    updateWidget()
+                                } else error = "Проверь поля: день 1–31, месяц 1–12, год — дата не в будущем"
+                            }
+                        }
+                    })
                     Text("Схема для прогноза", fontSize = 16.sp)
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         SleepEngine.AGES.forEachIndexed { i, a ->

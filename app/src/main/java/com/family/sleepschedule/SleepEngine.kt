@@ -624,12 +624,21 @@ object SleepEngine {
         }
     }
 
-    /** Парс даты рождения «ДД.ММ.ГГГГ»; null при ошибке или дате в будущем. */
-    fun parseBirthDate(text: String, today: java.time.LocalDate): Long? = try {
-        val d = java.time.LocalDate.parse(text.trim(), java.time.format.DateTimeFormatter.ofPattern("dd.MM.yyyy"))
-        if (d.isAfter(today)) null
-        else d.atStartOfDay(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
-    } catch (_: Exception) { null }
+    /**
+     * Дата рождения из трёх цифровых полей; null при ошибке или дате в будущем.
+     * Год — реалистичный диапазон: 4 цифры, от 2000 до следующего года.
+     */
+    fun parseBirthParts(day: String, month: String, year: String, today: java.time.LocalDate): Long? {
+        val d = day.toIntOrNull() ?: return null
+        val mo = month.toIntOrNull() ?: return null
+        val y = year.toIntOrNull() ?: return null
+        if (d !in 1..31 || mo !in 1..12 || y !in 2000..(today.year + 1)) return null
+        return try {
+            val date = java.time.LocalDate.of(y, mo, d)
+            if (date.isAfter(today)) null
+            else date.atStartOfDay(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
+        } catch (_: java.time.DateTimeException) { null }
+    }
 
     /**
      * Расшифровка окна бодрствования перед ближайшим сном (§«почему в 16:39»):
