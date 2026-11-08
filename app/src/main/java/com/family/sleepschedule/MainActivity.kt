@@ -156,6 +156,9 @@ fun App(prefs: SharedPreferences, version: String) {
     var planIndex by remember { mutableIntStateOf(prefs.getInt("plan", 0)) }
     var regress by remember { mutableStateOf(Prefs.loadRegress(prefs)) }
     var feeds by remember { mutableStateOf(Prefs.loadFeeds(prefs)) }
+    var childName by remember {
+        mutableStateOf(prefs.getString("childName", null)?.takeIf { it.isNotBlank() } ?: "Малыш")
+    }
     var settings by rememberSaveable { mutableStateOf(false) }
     var editor by rememberSaveable { mutableStateOf(false) }
     var manualEntry by rememberSaveable { mutableStateOf(false) }
@@ -268,7 +271,7 @@ fun App(prefs: SharedPreferences, version: String) {
                 verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text(if (settings) "Настройки" else if (historyOpen) "История" else "Дима", fontSize = 24.sp, fontWeight = FontWeight.SemiBold)
+                        Text(if (settings) "Настройки" else if (historyOpen) "История" else childName, fontSize = 24.sp, fontWeight = FontWeight.SemiBold)
                         Text(
                             if (settings) "BaSleep $version"
                             else if (historyOpen) "Завершённые сны по дням"
@@ -288,6 +291,22 @@ fun App(prefs: SharedPreferences, version: String) {
                     color = Amber, fontSize = 13.sp,
                 )
                 if (settings) {
+                    Text("Имя ребёнка", fontSize = 16.sp)
+                    var nameDraft by remember(childName) { mutableStateOf(childName) }
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            nameDraft,
+                            { nameDraft = it.take(20) },
+                            label = { Text("Как зовут малыша") },
+                            modifier = Modifier.weight(1f),
+                            singleLine = true,
+                        )
+                        FactPill("Сохранить", {
+                            childName = nameDraft.trim().ifEmpty { "Малыш" }
+                            prefs.edit().putString("childName", childName).apply()
+                            updateWidget()
+                        })
+                    }
                     Text("Схема для прогноза", fontSize = 16.sp)
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         SleepEngine.AGES.forEachIndexed { i, a ->
@@ -316,7 +335,7 @@ fun App(prefs: SharedPreferences, version: String) {
                     TextButton(onClick = { dim = !dim; settings = false }) { Text(if (dim) "Обычная яркость" else "Тусклый экран") }
                     TextButton(onClick = {
                         val text = buildString {
-                            append("Дима · ").append(phaseTitle(state.phase))
+                            append("$childName · ").append(phaseTitle(state.phase))
                             if (state.phase != LiveTracker.Phase.READY) append(" с ").append(clock(state.since))
                             forecasts.forEach { append("\n").append(clock(it.at)).append(" · ").append(it.title).append(" (прогноз)") }
                         }

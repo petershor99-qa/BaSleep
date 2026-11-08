@@ -40,7 +40,7 @@ class SleepEngineTest {
     }
 
     @Test
-    fun `схема 4 сна — контрольный день по правилам консультанта`() {
+    fun `схема 4 сна — контрольный день по нормам возраста`() {
         val plan = age3.plans[0]
         val s = SleepEngine.build(age3, plan, 9 * 60)
         assertEquals(listOf(625, 800, 980, 1155), s.naps.map { it.start })
