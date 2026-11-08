@@ -632,6 +632,14 @@ fun App(prefs: SharedPreferences, version: String) {
                                     Spacer(Modifier.weight(1f - left))
                                 }
                             }
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text(SleepEngine.fmtClock(base.wake), fontSize = 11.sp, color = Subtitle, style = Tabular)
+                                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                    Text("🌙 сон", fontSize = 11.sp, color = NightTint)
+                                    Text("⏱ бодрствование", fontSize = 11.sp, color = Subtitle)
+                                }
+                                Text(SleepEngine.fmtClock(base.bedtime % 1440), fontSize = 11.sp, color = Subtitle, style = Tabular)
+                            }
 
                             // Остатки по плану человеческим языком
                             val elapsedSleep = segments.filter { it.isNap }
