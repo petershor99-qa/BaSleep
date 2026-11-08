@@ -34,7 +34,7 @@ android {
         minSdk = 26
         targetSdk = 35
         versionCode = 21
-        versionName = "1.19"
+        versionName = "1.19.1"
     }
 
     if (hasReleaseKey) {

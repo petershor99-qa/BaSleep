@@ -763,6 +763,19 @@ fun App(prefs: SharedPreferences, version: String) {
                                         Box(Modifier.width(3.dp).fillMaxSize().background(Color.White.copy(alpha = 0.85f)))
                                         Spacer(Modifier.weight(1f - left))
                                     }
+                                    // Метки времени начала сна — только там, где помещаются целиком
+                                    Row(Modifier.fillMaxSize()) {
+                                        tl.segments.forEach { seg ->
+                                            Box(Modifier.weight(seg.dur.toFloat().coerceAtLeast(1f)), contentAlignment = Alignment.Center) {
+                                                if (seg.isSleep && barMaxWidth * (seg.dur.toFloat() / tl.endRel) >= 44.dp) {
+                                                    Text(
+                                                        clock(state.dayStart + seg.relStart * LiveTracker.MINUTE),
+                                                        fontSize = 9.sp, color = NightTint, style = Tabular,
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -784,8 +797,7 @@ fun App(prefs: SharedPreferences, version: String) {
                                 }
                             }
 
-                            // Факт дня — сворачиваемый блок
-                            var factsOpen by rememberSaveable { mutableStateOf(false) }
+                            // Статистика дня — всегда видна (§запрос v1.19.1)
                             val t = History.totals(history, state, now)
                             // Ночью: идущая сейчас ночь, иначе последняя завершённая (или «—»)
                             val liveNight = state.phase == LiveTracker.Phase.NIGHT
@@ -798,26 +810,19 @@ fun App(prefs: SharedPreferences, version: String) {
                             }
                             val nightText = nightMinutes?.let { SleepEngine.fmtDurHuman(it) } ?: "—"
                             val totalMin = t.daySleepMin + (nightMinutes ?: 0)
-                            Row(
-                                Modifier.fillMaxWidth().clickable { factsOpen = !factsOpen }.padding(vertical = 4.dp),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                            ) {
-                                Text("Факт", fontSize = 12.sp, color = Subtitle)
-                                Text(
-                                    "днём ${SleepEngine.fmtDurHuman(t.daySleepMin)} · всего ${SleepEngine.fmtDurHuman(totalMin)}",
-                                    fontSize = 12.sp, color = Subtitle, style = Tabular,
-                                )
-                                Text(if (factsOpen) "▾" else "▸", fontSize = 12.sp, color = Subtitle)
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                FactTile("Сон днём", SleepEngine.fmtDurHuman(t.daySleepMin), age.dayNormShort, t.daySleepMin >= age.dayMax - 15, Modifier.weight(1f))
+                                FactTile(nightLabel, nightText, age.nightNormShort, (nightMinutes ?: 0) >= age.nightMax - 15, Modifier.weight(1f))
+                                FactTile("Сон за сутки", SleepEngine.fmtDurHuman(totalMin), age.totalNormShort, totalMin >= age.totalMax - 15, Modifier.weight(1f))
                             }
-                            if (factsOpen) {
-                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    FactTile("Днём сегодня", SleepEngine.fmtDurHuman(t.daySleepMin), age.dayNormShort, t.daySleepMin >= age.dayMax - 15, Modifier.weight(1f))
-                                    FactTile(nightLabel, nightText, age.nightNormShort, (nightMinutes ?: 0) >= age.nightMax - 15, Modifier.weight(1f))
-                                    FactTile("Всего за сутки", SleepEngine.fmtDurHuman(totalMin), age.totalNormShort, totalMin >= age.totalMax - 15, Modifier.weight(1f))
-                                }
-                                t.dayAwakeMin?.let {
-                                    Text("Бодрствование днём ${SleepEngine.fmtDurHuman(it)}", fontSize = 12.sp, color = Subtitle)
-                                }
+                            val nightWakeMin = History.days(history).firstOrNull()?.nightWakeMin ?: 0
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text("⏱ Бодрствовал", fontSize = 13.sp, color = Subtitle)
+                                Text(
+                                    "днём ${SleepEngine.fmtDurHuman(t.dayAwakeMin ?: 0)}" +
+                                        if (nightWakeMin > 0) " · ночью ${SleepEngine.fmtDurHuman(nightWakeMin)}" else "",
+                                    fontSize = 13.sp, color = DarkScheme.onSurface, style = Tabular,
+                                )
                             }
 
                             TextButton(onClick = { planOpen = !planOpen }) {
