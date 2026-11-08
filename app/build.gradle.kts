@@ -33,8 +33,8 @@ android {
         applicationId = "com.family.sleepschedule"
         minSdk = 26
         targetSdk = 35
-        versionCode = 18
-        versionName = "1.16"
+        versionCode = 19
+        versionName = "1.16.1"
     }
 
     if (hasReleaseKey) {

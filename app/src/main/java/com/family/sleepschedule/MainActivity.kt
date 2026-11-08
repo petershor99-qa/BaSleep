@@ -77,6 +77,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
@@ -730,11 +731,16 @@ fun App(prefs: SharedPreferences, version: String) {
                             // Факт дня — плитками
                             if (state.dayStart > 0L) {
                                 val t = History.totals(history, state, now)
+                                // Ночью: идущая сейчас ночь, иначе последняя завершённая
+                                val liveNight = state.phase == LiveTracker.Phase.NIGHT
+                                val nightVal = if (liveNight) t.nightSleepMin
+                                    else history.filter { it.kind == History.Kind.NIGHT }.maxByOrNull { it.end }?.minutes ?: 0
+                                val nightLabel = if (liveNight) "Ночью сейчас" else "Прошлой ночью"
                                 Spacer(Modifier.height(2.dp))
                                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    FactTile("Днём", t.daySleepMin, age.dayNormShort, Modifier.weight(1f))
-                                    FactTile("Ночью", t.nightSleepMin, age.nightNormShort, Modifier.weight(1f))
-                                    FactTile("Всего", t.totalSleepMin, age.totalNormShort, Modifier.weight(1f))
+                                    FactTile("Дневной сон", t.daySleepMin, age.dayNormShort, age.dayMax - 15, Modifier.weight(1f))
+                                    FactTile(nightLabel, nightVal, age.nightNormShort, age.nightMax - 15, Modifier.weight(1f))
+                                    FactTile("За сутки", t.daySleepMin + nightVal, age.totalNormShort, age.totalMax - 15, Modifier.weight(1f))
                                 }
                                 t.dayAwakeMin?.let {
                                     Text("Бодрствование днём ${SleepEngine.fmtDurHuman(it)}", fontSize = 12.sp, color = Subtitle)
@@ -878,11 +884,12 @@ private fun NormLine(label: String, valueMin: Int, min: Int, max: Int, normShort
 
 /** Плитка факта: значение крупно, под ним подпись и норма. */
 @Composable
-private fun FactTile(label: String, minutes: Int, norm: String, modifier: Modifier = Modifier) {
-    val over = when (label) {
-        "Ночью" -> minutes > 12 * 60
-        "Всего" -> minutes > 17 * 60
-        else -> minutes > 5 * 60
+private fun FactTile(label: String, minutes: Int, norm: String, warnAt: Int, modifier: Modifier = Modifier) {
+    // Янтарный у лимита (за 15 мин до максимума) и за ним
+    val color = when {
+        minutes > warnAt + 15 -> Amber
+        minutes >= warnAt -> lerp(DarkScheme.onSurface, Amber, 0.6f)
+        else -> DarkScheme.onSurface
     }
     Column(
         modifier
@@ -893,9 +900,9 @@ private fun FactTile(label: String, minutes: Int, norm: String, modifier: Modifi
     ) {
         Text(
             SleepEngine.fmtDurHuman(minutes), fontSize = 15.sp, fontWeight = FontWeight.Bold,
-            color = if (over) Amber else DarkScheme.onSurface, style = Tabular,
+            color = color, style = Tabular,
         )
-        Text(label, fontSize = 11.sp, color = Subtitle)
+        Text(label, fontSize = 11.sp, color = Subtitle, maxLines = 1)
         Text(norm, fontSize = 9.sp, color = DarkScheme.onSurfaceVariant)
     }
 }
@@ -909,20 +916,42 @@ private fun ClockEditor(
     primaryLabel: String = "Сохранить",
     onSave: (Int, Int) -> String?,
 ) {
-    var h by rememberSaveable(initialHour, initialMinute) { mutableStateOf("%02d".format(initialHour)) }
-    var m by rememberSaveable(initialHour, initialMinute) { mutableStateOf("%02d".format(initialMinute)) }
+    // Поле «Часы» сразу в фокусе с выделенным текстом: печатать можно сразу,
+    // ввод заменяет подставленное время. 2 цифры — авто-переход на «Минуты».
+    val hFocus = remember { androidx.compose.ui.focus.FocusRequester() }
+    val mFocus = remember { androidx.compose.ui.focus.FocusRequester() }
+    val keyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
+    var h by rememberSaveable(initialHour, initialMinute, stateSaver = androidx.compose.ui.text.input.TextFieldValue.Saver) {
+        mutableStateOf(androidx.compose.ui.text.input.TextFieldValue("%02d".format(initialHour), androidx.compose.ui.text.TextRange(0, 2)))
+    }
+    var m by rememberSaveable(initialHour, initialMinute, stateSaver = androidx.compose.ui.text.input.TextFieldValue.Saver) {
+        mutableStateOf(androidx.compose.ui.text.input.TextFieldValue("%02d".format(initialMinute)))
+    }
     var error by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(Unit) {
+        hFocus.requestFocus()
+        keyboard?.show()
+    }
+    LaunchedEffect(h.text) { if (h.text.length >= 2) mFocus.requestFocus() }
     Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(DarkScheme.surface).padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         if (title != null) Text(title, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            OutlinedTextField(h, { h = it.filter(Char::isDigit).take(2) }, label = { Text("Часы") },
-                modifier = Modifier.weight(1f), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), singleLine = true)
-            OutlinedTextField(m, { m = it.filter(Char::isDigit).take(2) }, label = { Text("Минуты") },
-                modifier = Modifier.weight(1f), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), singleLine = true)
+            OutlinedTextField(
+                h,
+                { v -> val d = v.text.filter(Char::isDigit).take(2); h = v.copy(text = d, selection = androidx.compose.ui.text.TextRange(d.length)) },
+                label = { Text("Часы") },
+                modifier = Modifier.weight(1f).focusRequester(hFocus),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), singleLine = true)
+            OutlinedTextField(
+                m,
+                { v -> val d = v.text.filter(Char::isDigit).take(2); m = v.copy(text = d, selection = androidx.compose.ui.text.TextRange(d.length)) },
+                label = { Text("Минуты") },
+                modifier = Modifier.weight(1f).focusRequester(mFocus),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), singleLine = true)
         }
         if (error != null) Text(error!!, color = Amber, fontSize = 13.sp)
         Pressable(RoundedCornerShape(14.dp), DarkScheme.primary, Modifier.fillMaxWidth(), a11y = primaryLabel, onClick = {
-            val hour = h.toIntOrNull(); val min = m.toIntOrNull()
+            val hour = h.text.toIntOrNull(); val min = m.text.toIntOrNull()
             error = if (hour == null || min == null || hour !in 0..23 || min !in 0..59) "Укажи часы 00–23 и минуты 00–59" else onSave(hour, min)
         }) {
             Text(primaryLabel, fontSize = 16.sp, color = DarkScheme.onPrimary, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(12.dp))
@@ -931,6 +960,8 @@ private fun ClockEditor(
         Text("Время позже текущего считаем вчерашним.", fontSize = 12.sp, color = Subtitle)
     }
 }
+
+/** focusRequester применён на месте; нужен импорт androidx.compose.ui.focus.focusRequester. */
 
 /** Текст, значение которого «прокатывается» при изменении. */
 @Composable
